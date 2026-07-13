@@ -49,3 +49,38 @@ augroup END
 
 command! ClaudePairToggle let g:claude_pair_enabled = !g:claude_pair_enabled
       \ | echo 'claude-pair vim state: ' . (g:claude_pair_enabled ? 'on' : 'off')
+
+" --- show the latest suggestion in a scratch split -------------------------
+
+function! s:ShowLast() abort
+  let l:file = s:state_dir . '/last_suggestion.txt'
+  if !filereadable(l:file)
+    echo 'claude-pair: no suggestion yet'
+    return
+  endif
+  let l:lines = readfile(l:file)
+  " reuse the previous suggestion window if it's still open
+  let l:existing = bufwinnr('claude-pair://last')
+  if l:existing > 0
+    execute l:existing . 'wincmd w'
+    setlocal modifiable
+    silent %delete _
+  else
+    botright new
+    setlocal buftype=nofile bufhidden=wipe noswapfile nobuflisted
+    setlocal filetype=claudepair
+    silent! file claude-pair://last
+    nnoremap <silent> <buffer> q :close<CR>
+  endif
+  call setline(1, l:lines)
+  execute 'resize' max([3, min([len(l:lines) + 1, 12])])
+  setlocal nomodifiable
+endfunction
+
+command! ClaudeLast call s:ShowLast()
+
+nnoremap <silent> <Plug>(ClaudePairLast) :call <SID>ShowLast()<CR>
+if get(g:, 'claude_pair_default_mappings', 1) && !hasmapto('<Plug>(ClaudePairLast)')
+      \ && empty(maparg('<Leader>cl', 'n'))
+  nmap <Leader>cl <Plug>(ClaudePairLast)
+endif

@@ -30,6 +30,8 @@ CACHE_DIR = (
 VIM_STATE_FILE = CACHE_DIR / "vim_state.json"
 VIM_STATE_MAX_AGE = 120  # seconds before vim state is considered stale
 INBOX_DIR = CACHE_DIR / "inbox"  # `claude-pair say` drops messages here
+LAST_SUGGESTION_FILE = CACHE_DIR / "last_suggestion.txt"
+SUGGESTION_LOG = CACHE_DIR / "suggestions.log"
 
 SYSTEM_PROMPT = """\
 You are an expert pair programmer quietly looking over the user's shoulder. \
@@ -268,10 +270,24 @@ class Suggester:
             self.printer.tick()
         else:
             self.printer.stream("\n")
+            self._save_suggestion(reply)
 
         # keep the assistant turn (including SKIP) so the model knows what it
         # already said and doesn't repeat itself
         self.messages.append({"role": "assistant", "content": reply or "SKIP"})
+
+    @staticmethod
+    def _save_suggestion(reply: str) -> None:
+        """Persist the suggestion for `claude-pair last` and :ClaudeLast."""
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{stamp}]\n{reply}\n"
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            LAST_SUGGESTION_FILE.write_text(entry)
+            with SUGGESTION_LOG.open("a") as log:
+                log.write(entry + "\n")
+        except OSError:
+            pass  # persistence is best-effort; never break the watcher
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +391,20 @@ def say(words: list[str]) -> None:
     (INBOX_DIR / f"msg-{time.time_ns()}.txt").write_text(message)
 
 
+def last() -> None:
+    """`claude-pair last` — print the most recent suggestion."""
+    try:
+        sys.stdout.write(LAST_SUGGESTION_FILE.read_text())
+    except OSError:
+        sys.exit("claude-pair: no suggestion yet")
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "say":
         say(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "last":
+        last()
         return
 
     parser = argparse.ArgumentParser(
@@ -410,7 +437,7 @@ def main() -> None:
     parser.add_argument(
         "--cooldown",
         type=float,
-        default=4.0,
+        default=2.0,
         help="minimum seconds between Claude calls",
     )
     parser.add_argument(

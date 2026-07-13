@@ -91,6 +91,21 @@ Three ways to ask it something directly (direct messages are always answered
   last commit?` at the prompt — in fish that's a no-op comment, but the
   watcher sees it on screen and answers it once.
 
+### Recalling the last suggestion
+
+Every real suggestion (not the `SKIP`s) is saved to
+`~/.cache/claude-pair/last_suggestion.txt`, with a running history in
+`~/.cache/claude-pair/suggestions.log`. To pull it up without looking at the
+side pane:
+
+- **In vim:** `:ClaudeLast`, mapped to `<leader>cl` by default — opens the
+  suggestion in a small scratch split (`q` closes it). Set
+  `let g:claude_pair_default_mappings = 0` to opt out of the mapping, or map
+  `<Plug>(ClaudePairLast)` yourself.
+- **In fish (or any shell):** `claude-pair last`. A `claude-last` wrapper
+  function ships in `fish/functions/` — copy or symlink it into
+  `~/.config/fish/functions/` if you want the shorter name.
+
 Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 
 | flag | default | meaning |
@@ -98,7 +113,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--debounce` | `0.25` | seconds of quiet after a change before asking Claude |
-| `--cooldown` | `4` | minimum seconds between API calls |
+| `--cooldown` | `2` | minimum seconds between API calls |
 | `--scrollback` | `50` | extra history lines beyond the visible screen |
 | `--history` | `8` | snapshot/reply pairs Claude remembers |
 | `--width` | `60` | side pane width |
