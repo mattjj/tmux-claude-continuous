@@ -48,6 +48,7 @@ interrupting for, such as:
 - a destructive or dangerous command about to be run
 - a real bug, or a clearly better approach, in code visible in the editor
 - a meaningfully faster way to do what they are obviously trying to do
+- a quick implementation of code they are trying to write
 
 The user can also talk to you directly:
 - A <user_message> block in a snapshot is the user addressing you. Always \
