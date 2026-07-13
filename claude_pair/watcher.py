@@ -12,22 +12,24 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
-VIM_STATE_FILE = (
-    Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    / "claude-pair"
-    / "vim_state.json"
+CACHE_DIR = (
+    Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "claude-pair"
 )
+VIM_STATE_FILE = CACHE_DIR / "vim_state.json"
 VIM_STATE_MAX_AGE = 120  # seconds before vim state is considered stale
+INBOX_DIR = CACHE_DIR / "inbox"  # `claude-pair say` drops messages here
 
 SYSTEM_PROMPT = """\
 You are an expert pair programmer quietly looking over the user's shoulder. \
@@ -46,6 +48,15 @@ interrupting for, such as:
 - a destructive or dangerous command about to be run
 - a real bug, or a clearly better approach, in code visible in the editor
 - a meaningfully faster way to do what they are obviously trying to do
+
+The user can also talk to you directly:
+- A <user_message> block in a snapshot is the user addressing you. Always \
+answer it — never SKIP a snapshot that contains one. Be concise but complete; \
+you may exceed the bullet limit for a real question.
+- A shell comment addressed to you in the terminal (like \
+`# claude: how do I undo the last commit?`) is also a direct question. Answer \
+it the first time you see it; if an earlier reply of yours already answered \
+it, SKIP.
 
 Rules:
 - Most snapshots deserve SKIP. Routine, correct activity needs no comment. \
@@ -87,8 +98,46 @@ def read_vim_state() -> dict | None:
         return None
 
 
-def build_snapshot(pane_text: str, vim_state: dict | None) -> str:
-    parts = [f"<terminal>\n{pane_text}\n</terminal>"]
+def poll_inbox() -> list[str]:
+    """Consume messages dropped by `claude-pair say`."""
+    try:
+        files = sorted(INBOX_DIR.glob("msg-*.txt"))
+    except OSError:
+        return []
+    messages = []
+    for path in files:
+        try:
+            text = path.read_text().strip()
+            path.unlink()
+        except OSError:
+            continue
+        if text:
+            messages.append(text)
+    return messages
+
+
+def start_stdin_reader(inbox: "queue.Queue[str]") -> None:
+    """Lines typed into the watcher pane become direct messages."""
+
+    def reader() -> None:
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if line:
+                    inbox.put(line)
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=reader, daemon=True).start()
+
+
+def build_snapshot(
+    pane_text: str, vim_state: dict | None, user_messages: list[str] | None = None
+) -> str:
+    parts = []
+    for msg in user_messages or []:
+        parts.append(f"<user_message>\n{msg}\n</user_message>")
+    parts.append(f"<terminal>\n{pane_text}\n</terminal>")
     if vim_state and vim_state.get("context"):
         first = vim_state.get("first_line", 1)
         lines = vim_state["context"]
@@ -234,6 +283,10 @@ def watch(args: argparse.Namespace) -> None:
         f"claude-pair watching {args.target} "
         f"(model={args.model}, effort={args.effort}, debounce={args.debounce}s)"
     )
+    printer.banner(
+        "talk to me: type here + Enter, run `claude-pair say ...`, "
+        "or type `# claude: ...` in your shell"
+    )
     if not args.dry_run and not (
         os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
     ):
@@ -243,6 +296,11 @@ def watch(args: argparse.Namespace) -> None:
         )
 
     suggester = None if args.dry_run else Suggester(args, printer)
+
+    stdin_inbox: "queue.Queue[str]" = queue.Queue()
+    start_stdin_reader(stdin_inbox)
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    poll_inbox()  # discard messages queued before we started
 
     last_hash = None
     last_change_at = None
@@ -262,12 +320,19 @@ def watch(args: argparse.Namespace) -> None:
             last_hash = digest
             last_change_at = now
 
+        # direct messages jump the queue: no debounce, no cooldown
+        direct = poll_inbox()
+        while not stdin_inbox.empty():
+            direct.append(stdin_inbox.get_nowait())
+
         settled = last_change_at is not None and now - last_change_at >= args.debounce
         cooled = now - last_call_at >= args.cooldown
-        if digest != analyzed_hash and settled and cooled:
+        pane_is_new = digest != analyzed_hash
+
+        if direct or (pane_is_new and settled and cooled):
             analyzed_hash = digest
             last_call_at = now
-            snapshot = build_snapshot(pane_text, read_vim_state())
+            snapshot = build_snapshot(pane_text, read_vim_state(), direct)
             if args.dry_run:
                 printer.divider()
                 printer.stream(snapshot + "\n")
@@ -300,11 +365,25 @@ def launch_split(args: argparse.Namespace, extra_argv: list[str]) -> None:
     print(f"claude-pair: watching pane {target} in a new side pane")
 
 
+def say(words: list[str]) -> None:
+    """`claude-pair say <message>` — send a direct message to the watcher."""
+    message = " ".join(words).strip()
+    if not message:
+        sys.exit("usage: claude-pair say <message>")
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    (INBOX_DIR / f"msg-{time.time_ns()}.txt").write_text(message)
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "say":
+        say(sys.argv[2:])
+        return
+
     parser = argparse.ArgumentParser(
         prog="claude-pair",
         description="Claude pair programmer watching your tmux pane. "
-        "Run with no --target inside tmux to open a watcher side pane.",
+        "Run with no --target inside tmux to open a watcher side pane. "
+        "`claude-pair say <message>` talks to a running watcher.",
     )
     parser.add_argument(
         "--target", help="tmux pane to watch (e.g. %%3). Omit to auto-split."
@@ -324,7 +403,7 @@ def main() -> None:
     parser.add_argument(
         "--debounce",
         type=float,
-        default=1.5,
+        default=0.25,
         help="quiet time after a change before asking Claude, seconds",
     )
     parser.add_argument(

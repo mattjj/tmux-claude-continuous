@@ -78,13 +78,26 @@ claude-pair
 That splits a 60-column side pane (focus stays where you are) and starts
 watching. Ctrl-C in the side pane (or just kill the pane) stops it.
 
+### Talking to it
+
+Three ways to ask it something directly (direct messages are always answered
+— no `SKIP` — and skip the debounce/cooldown):
+
+- **Type in the watcher pane.** Jump into the side pane, type a message, hit
+  Enter.
+- **`claude-pair say "why did that fail?"`** from any pane or script. Messages
+  land within a second.
+- **A shell comment in your work pane.** Type `# claude: how do I undo the
+  last commit?` at the prompt — in fish that's a no-op comment, but the
+  watcher sees it on screen and answers it once.
+
 Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 
 | flag | default | meaning |
 |---|---|---|
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
-| `--debounce` | `1.5` | seconds of quiet after a change before asking Claude |
+| `--debounce` | `0.25` | seconds of quiet after a change before asking Claude |
 | `--cooldown` | `4` | minimum seconds between API calls |
 | `--scrollback` | `50` | extra history lines beyond the visible screen |
 | `--history` | `8` | snapshot/reply pairs Claude remembers |
