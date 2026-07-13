@@ -50,7 +50,29 @@ augroup END
 command! ClaudePairToggle let g:claude_pair_enabled = !g:claude_pair_enabled
       \ | echo 'claude-pair vim state: ' . (g:claude_pair_enabled ? 'on' : 'off')
 
-" --- show the latest suggestion in a scratch split -------------------------
+" --- paste the latest suggestion's code at the cursor ----------------------
+
+function! s:PasteLast() abort
+  let l:file = s:state_dir . '/last_code.txt'
+  if !filereadable(l:file)
+    echo 'claude-pair: no code in the last suggestion (:ClaudeLastShow for the full text)'
+    return
+  endif
+  let l:lines = readfile(l:file)
+  " drop trailing blank lines
+  while !empty(l:lines) && l:lines[-1] =~# '^\s*$'
+    call remove(l:lines, -1)
+  endwhile
+  if empty(l:lines)
+    echo 'claude-pair: no code in the last suggestion (:ClaudeLastShow for the full text)'
+    return
+  endif
+  call append(line('.'), l:lines)
+  execute 'normal! ' . (line('.') + 1) . 'G'
+  echo 'claude-pair: inserted ' . len(l:lines) . ' line(s)'
+endfunction
+
+" --- show the full latest suggestion in a scratch split --------------------
 
 function! s:ShowLast() abort
   let l:file = s:state_dir . '/last_suggestion.txt'
@@ -82,10 +104,16 @@ function! s:ShowLast() abort
   setlocal nomodifiable
 endfunction
 
-command! ClaudeLast call s:ShowLast()
+command! ClaudeLast call s:PasteLast()
+command! ClaudeLastShow call s:ShowLast()
 
-nnoremap <silent> <Plug>(ClaudePairLast) :call <SID>ShowLast()<CR>
-if get(g:, 'claude_pair_default_mappings', 1) && !hasmapto('<Plug>(ClaudePairLast)')
-      \ && empty(maparg('<Leader>cl', 'n'))
-  nmap <Leader>cl <Plug>(ClaudePairLast)
+nnoremap <silent> <Plug>(ClaudePairLast) :call <SID>PasteLast()<CR>
+nnoremap <silent> <Plug>(ClaudePairShow) :call <SID>ShowLast()<CR>
+if get(g:, 'claude_pair_default_mappings', 1)
+  if !hasmapto('<Plug>(ClaudePairLast)') && empty(maparg('<Leader>cl', 'n'))
+    nmap <Leader>cl <Plug>(ClaudePairLast)
+  endif
+  if !hasmapto('<Plug>(ClaudePairShow)') && empty(maparg('<Leader>cs', 'n'))
+    nmap <Leader>cs <Plug>(ClaudePairShow)
+  endif
 endif

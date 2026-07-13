@@ -97,22 +97,25 @@ Three ways to ask it something directly (direct messages are always answered
 
 ### Recalling the last suggestion
 
-Every real suggestion (not the `SKIP`s) is saved to
-`~/.cache/claude-pair/last_suggestion.txt`, with a running history in
-`~/.cache/claude-pair/suggestions.log`. To pull it up without looking at the
-side pane:
+Every real suggestion (not the `SKIP`s) is saved under `~/.cache/claude-pair/`:
+the full text in `last_suggestion.txt`, just the fenced code blocks in
+`last_code.txt`, and a running history in `suggestions.log`. The model is
+told fences are the deliverable — paste-ready code, prose stays outside — so
+"the code part" is well defined.
 
-- **In vim:** `:ClaudeLast`, mapped to `<leader>cl` by default — opens the
-  suggestion in a small scratch split (`q` closes it). The buffer is
-  `filetype=markdown` with `g:markdown_fenced_languages` defaulted to
-  `python`, `fish`, `sh`, `vim`, so code blocks are syntax-highlighted
-  natively (set it yourself before the plugin loads to override). Set
-  `let g:claude_pair_default_mappings = 0` to opt out of the mapping, or map
-  `<Plug>(ClaudePairLast)` yourself.
-- **In fish (or any shell):** `claude-pair last` — rendered with colors and
-  highlighting on a tty, plain text when piped. A `claude-last` wrapper
-  function ships in `fish/functions/` — copy or symlink it into
-  `~/.config/fish/functions/` if you want the shorter name.
+- **In vim:** `:ClaudeLast` (`<leader>cl`) pastes the code from the latest
+  suggestion at your cursor and reports how many lines it inserted. Undo with
+  a single `u` as usual. `:ClaudeLastShow` (`<leader>cs`) opens the *full*
+  suggestion — prose included — in a small markdown scratch split with
+  syntax-highlighted code blocks (`q` closes it;
+  `g:markdown_fenced_languages` defaults to `python, fish, sh, vim`). Set
+  `let g:claude_pair_default_mappings = 0` to opt out of both mappings, or
+  map `<Plug>(ClaudePairLast)` / `<Plug>(ClaudePairShow)` yourself.
+- **In fish (or any shell):** `claude-pair last` renders the full suggestion
+  (colors on a tty, plain when piped); `claude-pair last --code` prints just
+  the raw code — handy as `claude-pair last --code | fish_clipboard_copy`.
+  A `claude-last` wrapper function ships in `fish/functions/` — copy or
+  symlink it into `~/.config/fish/functions/` if you want the shorter name.
 
 Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 

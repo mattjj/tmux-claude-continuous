@@ -35,6 +35,7 @@ VIM_STATE_FILE = CACHE_DIR / "vim_state.json"
 VIM_STATE_MAX_AGE = 120  # seconds before vim state is considered stale
 INBOX_DIR = CACHE_DIR / "inbox"  # `claude-pair say` drops messages here
 LAST_SUGGESTION_FILE = CACHE_DIR / "last_suggestion.txt"
+LAST_CODE_FILE = CACHE_DIR / "last_code.txt"  # just the fenced code blocks
 SUGGESTION_LOG = CACHE_DIR / "suggestions.log"
 
 SYSTEM_PROMPT = """\
@@ -79,6 +80,11 @@ language tag (```fish, ```python, ```vim) for commands, snippets, and \
 implementations. No headers, no tables, no bold walls of text. Keep prose \
 lines under ~52 characters where possible — the output pane is narrow. A \
 one-line command fix can just be a fenced command.
+- Fences are the deliverable: anything the user might paste into their \
+editor or run goes inside a fenced block, ready to use as-is; explanation \
+stays outside. The user has commands that insert your latest fenced code \
+directly at their cursor, so never put prose, placeholders you haven't \
+flagged, or "..." elisions inside a fence.
 """
 
 
@@ -301,10 +307,31 @@ class Suggester:
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             LAST_SUGGESTION_FILE.write_text(entry)
+            LAST_CODE_FILE.write_text(extract_code(reply))
             with SUGGESTION_LOG.open("a") as log:
                 log.write(entry + "\n")
         except OSError:
             pass  # persistence is best-effort; never break the watcher
+
+
+def extract_code(reply: str) -> str:
+    """The contents of all fenced code blocks, blank-line separated."""
+    blocks: list[str] = []
+    current: list[str] = []
+    in_fence = False
+    for line in reply.splitlines():
+        if line.lstrip().startswith("```"):
+            if in_fence:
+                blocks.append("\n".join(current))
+                current = []
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            current.append(line)
+    if in_fence and current:  # unclosed fence (response cut short)
+        blocks.append("\n".join(current))
+    blocks = [b for b in blocks if b.strip()]
+    return "\n\n".join(blocks) + "\n" if blocks else ""
 
 
 # ---------------------------------------------------------------------------
@@ -408,8 +435,21 @@ def say(words: list[str]) -> None:
     (INBOX_DIR / f"msg-{time.time_ns()}.txt").write_text(message)
 
 
-def last() -> None:
-    """`claude-pair last` — print the most recent suggestion (rendered)."""
+def last(argv: list[str]) -> None:
+    """`claude-pair last` — print the most recent suggestion (rendered).
+
+    `claude-pair last --code` prints just the fenced code, raw — suitable
+    for piping (e.g. `claude-pair last --code | fish_clipboard_copy`).
+    """
+    if "--code" in argv:
+        try:
+            code = LAST_CODE_FILE.read_text()
+        except OSError:
+            code = ""
+        if not code.strip():
+            sys.exit("claude-pair: no code in the last suggestion")
+        sys.stdout.write(code)
+        return
     try:
         text = LAST_SUGGESTION_FILE.read_text()
     except OSError:
@@ -427,7 +467,7 @@ def main() -> None:
         say(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "last":
-        last()
+        last(sys.argv[2:])
         return
 
     parser = argparse.ArgumentParser(
