@@ -30,6 +30,10 @@ around your cursor, including unsaved edits.
   SKIPs render as a quiet `·`; real suggestions stream in under a timestamp.
 - Prompt caching keeps the repeated context cheap; only new snapshot content
   is billed at full input price.
+- Output is rendered with [rich](https://github.com/Textualize/rich):
+  suggestions are light markdown, so bullets render as bullets and fenced
+  code blocks (```python, ```fish, …) are syntax-highlighted as they stream
+  in. `--theme` picks the pygments theme (default `monokai`).
 
 ## Install
 
@@ -99,10 +103,14 @@ Every real suggestion (not the `SKIP`s) is saved to
 side pane:
 
 - **In vim:** `:ClaudeLast`, mapped to `<leader>cl` by default — opens the
-  suggestion in a small scratch split (`q` closes it). Set
+  suggestion in a small scratch split (`q` closes it). The buffer is
+  `filetype=markdown` with `g:markdown_fenced_languages` defaulted to
+  `python`, `fish`, `sh`, `vim`, so code blocks are syntax-highlighted
+  natively (set it yourself before the plugin loads to override). Set
   `let g:claude_pair_default_mappings = 0` to opt out of the mapping, or map
   `<Plug>(ClaudePairLast)` yourself.
-- **In fish (or any shell):** `claude-pair last`. A `claude-last` wrapper
+- **In fish (or any shell):** `claude-pair last` — rendered with colors and
+  highlighting on a tty, plain text when piped. A `claude-last` wrapper
   function ships in `fish/functions/` — copy or symlink it into
   `~/.config/fish/functions/` if you want the shorter name.
 
@@ -112,6 +120,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 |---|---|---|
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
+| `--theme` | `monokai` | pygments theme for code blocks (`dracula`, `ansi_dark`, …) |
 | `--debounce` | `0.25` | seconds of quiet after a change before asking Claude |
 | `--cooldown` | `2` | minimum seconds between API calls |
 | `--scrollback` | `50` | extra history lines beyond the visible screen |

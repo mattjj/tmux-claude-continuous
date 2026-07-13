@@ -68,7 +68,12 @@ function! s:ShowLast() abort
   else
     botright new
     setlocal buftype=nofile bufhidden=wipe noswapfile nobuflisted
-    setlocal filetype=claudepair
+    " suggestions are light markdown; fenced blocks get language highlighting
+    if !exists('g:markdown_fenced_languages')
+      let g:markdown_fenced_languages = ['python', 'fish', 'sh', 'vim']
+    endif
+    setlocal filetype=markdown
+    setlocal conceallevel=2 nonumber norelativenumber signcolumn=no
     silent! file claude-pair://last
     nnoremap <silent> <buffer> q :close<CR>
   endif

@@ -3,7 +3,7 @@ name = "claude-pair"
 version = "0.1.0"
 description = "A Claude pair programmer that watches your tmux pane and offers suggestions"
 requires-python = ">=3.9"
-dependencies = ["anthropic>=0.90"]
+dependencies = ["anthropic>=0.90", "rich>=13"]
 
 [project.scripts]
 claude-pair = "claude_pair.watcher:main"

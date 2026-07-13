@@ -14,13 +14,17 @@ import json
 import os
 import queue
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.rule import Rule
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -69,10 +73,12 @@ written is wrong or headed somewhere bad.
 are in this conversation). If the situation hasn't changed, SKIP.
 - Don't guess at intent you can't see. If a command is ambiguous but \
 plausible, SKIP.
-- When you do speak: at most 3 short bullets, most important first. Plain \
-text, no markdown headers or code fences. Keep lines under ~56 characters \
-where possible — the output pane is narrow. A one-word command fix can just \
-be the corrected command.
+- When you do speak: at most 3 short bullets ("- "), most important first. \
+Simple markdown only: bullets, `inline code`, and fenced code blocks with a \
+language tag (```fish, ```python, ```vim) for commands, snippets, and \
+implementations. No headers, no tables, no bold walls of text. Keep prose \
+lines under ~52 characters where possible — the output pane is narrow. A \
+one-line command fix can just be a fenced command.
 """
 
 
@@ -167,31 +173,37 @@ def build_snapshot(
 
 class Printer:
     def __init__(self) -> None:
-        self.color = sys.stdout.isatty()
-
-    def _c(self, code: str, text: str) -> str:
-        return f"\033[{code}m{text}\033[0m" if self.color else text
+        self.console = Console(highlight=False)
 
     def banner(self, text: str) -> None:
-        print(self._c("2", text), flush=True)
+        self.console.print(text, style="dim")
 
     def divider(self) -> None:
-        width = shutil.get_terminal_size((60, 20)).columns
         stamp = datetime.now().strftime("%H:%M:%S")
-        line = f"── {stamp} " + "─" * max(0, width - len(stamp) - 4)
-        print("\n" + self._c("36", line), flush=True)
+        self.console.print()
+        self.console.print(
+            Rule(title=f"[bold cyan]✻[/] [dim]{stamp}[/]", style="cyan", align="left")
+        )
 
     def stream(self, text: str) -> None:
+        # plain passthrough (dry-run output)
         sys.stdout.write(text)
         sys.stdout.flush()
 
+    def live_suggestion(self, refresh_per_second: int = 8) -> Live:
+        """A live-updating region the suggestion streams into as markdown."""
+        return Live(
+            console=self.console,
+            refresh_per_second=refresh_per_second,
+            vertical_overflow="visible",
+        )
+
     def note(self, text: str) -> None:
-        print(self._c("33", text), flush=True)
+        self.console.print(text, style="yellow")
 
     def tick(self) -> None:
         # quiet heartbeat for SKIP responses
-        sys.stdout.write(self._c("2", "·"))
-        sys.stdout.flush()
+        self.console.print("·", style="dim", end="")
 
 
 # ---------------------------------------------------------------------------
@@ -237,39 +249,44 @@ class Suggester:
 
     def _call(self) -> None:
         buffered = ""
-        speaking = False
-        with self.client.messages.stream(
-            model=self.args.model,
-            max_tokens=4000,
-            thinking={"type": "adaptive"},
-            output_config={"effort": self.args.effort},
-            cache_control={"type": "ephemeral"},
-            system=SYSTEM_PROMPT,
-            messages=self.messages,
-        ) as stream:
-            for text in stream.text_stream:
-                if speaking:
-                    self.printer.stream(text)
-                    continue
-                buffered += text
-                stripped = buffered.lstrip()
-                if stripped and not "SKIP".startswith(stripped[:4].upper()):
-                    # definitely not a SKIP — start showing it
-                    speaking = True
-                    self.printer.divider()
-                    self.printer.stream(stripped)
-            final = stream.get_final_message()
+        live: Live | None = None
+        try:
+            with self.client.messages.stream(
+                model=self.args.model,
+                max_tokens=4000,
+                thinking={"type": "adaptive"},
+                output_config={"effort": self.args.effort},
+                cache_control={"type": "ephemeral"},
+                system=SYSTEM_PROMPT,
+                messages=self.messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    buffered += text
+                    if live is None:
+                        stripped = buffered.lstrip()
+                        if stripped and not "SKIP".startswith(stripped[:4].upper()):
+                            # definitely not a SKIP — start rendering it
+                            self.printer.divider()
+                            live = self.printer.live_suggestion()
+                            live.start()
+                    if live is not None:
+                        live.update(
+                            Markdown(buffered.strip(), code_theme=self.args.theme)
+                        )
+                final = stream.get_final_message()
+        finally:
+            if live is not None:
+                live.stop()
 
         reply = "".join(
             block.text for block in final.content if block.type == "text"
         ).strip()
 
         if final.stop_reason == "refusal":
-            self.printer.note("\n[claude declined to comment on this snapshot]")
-        elif not speaking:
+            self.printer.note("[claude declined to comment on this snapshot]")
+        elif live is None:
             self.printer.tick()
         else:
-            self.printer.stream("\n")
             self._save_suggestion(reply)
 
         # keep the assistant turn (including SKIP) so the model knows what it
@@ -392,11 +409,17 @@ def say(words: list[str]) -> None:
 
 
 def last() -> None:
-    """`claude-pair last` — print the most recent suggestion."""
+    """`claude-pair last` — print the most recent suggestion (rendered)."""
     try:
-        sys.stdout.write(LAST_SUGGESTION_FILE.read_text())
+        text = LAST_SUGGESTION_FILE.read_text()
     except OSError:
         sys.exit("claude-pair: no suggestion yet")
+    console = Console(highlight=False)
+    lines = text.splitlines()
+    if lines and lines[0].startswith("["):
+        console.print(lines[0], style="dim")
+        text = "\n".join(lines[1:])
+    console.print(Markdown(text.strip(), code_theme="monokai"))
 
 
 def main() -> None:
@@ -424,6 +447,11 @@ def main() -> None:
         default="low",
         choices=["low", "medium", "high", "xhigh", "max"],
         help="reasoning effort per suggestion (default: low, for snappiness)",
+    )
+    parser.add_argument(
+        "--theme",
+        default="monokai",
+        help="pygments theme for code blocks (e.g. monokai, dracula, ansi_dark)",
     )
     parser.add_argument(
         "--interval", type=float, default=1.0, help="pane poll interval, seconds"
