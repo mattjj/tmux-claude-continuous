@@ -107,6 +107,41 @@ def capture_pane(target: str, scrollback: int) -> str:
     return result.stdout.rstrip()
 
 
+def _window_visible(pane: str) -> bool:
+    """True if `pane`'s window is the one the user is currently viewing."""
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", pane, "#{window_active}"],
+        capture_output=True,
+        text=True,
+    )
+    # if we can't tell, assume visible (don't ping spuriously)
+    return result.returncode != 0 or result.stdout.strip() != "0"
+
+
+def summarize(reply: str) -> str:
+    """First meaningful line of a suggestion, for a one-line status ping."""
+    for line in reply.splitlines():
+        text = line.strip().lstrip("-*").strip().strip("`").strip()
+        if text:
+            return text[:64]
+    return "new suggestion"
+
+
+def notify_status(own_pane: str | None, summary: str) -> None:
+    """Ping the tmux status line if the watcher's pane isn't on screen."""
+    if not own_pane or _window_visible(own_pane):
+        return
+    # '#' is the tmux format-expansion char; double it so summaries render raw
+    text = ("✻ claude-pair: " + summary + "  (:cl / claude-pair last)").replace(
+        "#", "##"
+    )
+    # -d sets duration (tmux >= 3.2); fall back to the user's display-time
+    if subprocess.run(
+        ["tmux", "display-message", "-d", "4000", text], capture_output=True
+    ).returncode != 0:
+        subprocess.run(["tmux", "display-message", text], capture_output=True)
+
+
 def resolve_active_pane(own_pane: str | None) -> str | None:
     """The active pane of the active window in this session, if it isn't us."""
     result = subprocess.run(
@@ -247,6 +282,7 @@ class Suggester:
         self.client = anthropic.Anthropic()
         self.args = args
         self.printer = printer
+        self.own_pane = os.environ.get("TMUX_PANE")
         self.messages: list[dict] = []
 
     def _trim_history(self) -> None:
@@ -317,6 +353,8 @@ class Suggester:
             self.printer.tick()
         else:
             self._save_suggestion(reply)
+            if self.args.notify:
+                notify_status(self.own_pane, summarize(reply))
 
         # keep the assistant turn (including SKIP) so the model knows what it
         # already said and doesn't repeat itself
@@ -571,6 +609,13 @@ def main() -> None:
         action="store_true",
         help="stay on the launch/--target pane instead of following the "
         "active pane as you move around",
+    )
+    parser.add_argument(
+        "--notify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="ping the tmux status line for suggestions when the watcher "
+        "pane is on another window (default: on; use --no-notify to disable)",
     )
     parser.add_argument(
         "--model", default=os.environ.get("CLAUDE_PAIR_MODEL", DEFAULT_MODEL)
