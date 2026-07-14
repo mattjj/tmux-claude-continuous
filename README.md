@@ -6,16 +6,15 @@ lines — and streams suggestions into a side pane when (and only when) it has
 something worth saying. With the vim plugin installed it also sees the code
 around your cursor, including unsaved edits.
 
-```
-┌─────────────────────────────┬──────────────────────┐
-│ your shell / vim            │ claude-pair          │
-│                             │                      │
-│ $ git push --force origin m │ ── 14:02:11 ──────── │
-│                             │ - --force on main?   │
-│                             │   consider           │
-│                             │   --force-with-lease │
-└─────────────────────────────┴──────────────────────┘
-```
+![claude-pair spotting a bug mid-edit](docs/screenshot-watch.svg)
+
+Ask it something directly with a `# claude:` comment at your prompt (a fish
+no-op), and pull the answer's code straight into vim with `<leader>cl`:
+
+![asking claude-pair with a # claude: comment](docs/screenshot-ask.svg)
+
+(Screenshots are generated from the real rendering code by
+`docs/make_screenshots.py`.)
 
 ## How it works
 
@@ -138,9 +137,25 @@ A tmux binding makes it one keystroke:
 bind P run-shell "tmux send-keys 'claude-pair' Enter"
 ```
 
+## Tips
+
+- **Terminal question → code in your buffer.** Type
+  `# claude: write a fish function that ...` at your prompt, wait for the
+  suggestion, then hit `<leader>cl` in vim. Question asked in the terminal,
+  answer landed at your cursor.
+- **Clipboard:** `claude-pair last --code | fish_clipboard_copy`.
+- **Fresher vim context:** `set updatetime=1000` so the plugin writes state
+  after 1s pauses instead of the default 4s.
+- **Pane focus:** the side pane never steals focus; SKIPs show as a dim `·`
+  so you can see it's alive without reading it.
+- **Tune the chattiness** in `SYSTEM_PROMPT` (`claude_pair/watcher.py`) —
+  the "worth interrupting for" list is the dial.
+
 ## Cost note
 
-Default settings call the API on every pause in activity, with Opus. Prompt
+Default settings call the API on every pause in activity, with Opus. With
+`--debounce 0.25` and `--cooldown 2` that's up to ~30 calls/minute while
+you're actively working — the cooldown is the effective rate limiter. Prompt
 caching keeps repeated context ~10x cheaper, but if you leave it running all
 day and want it cheaper still, drop the model
 (`--model claude-sonnet-5` or `claude-haiku-4-5`) or raise
