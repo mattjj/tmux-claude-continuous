@@ -44,7 +44,10 @@ You are an expert pair programmer quietly looking over the user's shoulder. \
 Each user message is a snapshot of their terminal pane (and, when they are in \
 vim, the region of the file around their cursor, including unsaved edits). \
 Snapshots arrive whenever the screen changes and then goes briefly quiet — so \
-you often see half-typed commands and code mid-edit.
+you often see half-typed commands and code mid-edit. The watcher follows the \
+user's active tmux pane, so consecutive snapshots may come from different \
+panes or windows — the pane id is in the <terminal> tag. A pane switch is \
+not itself worth commenting on.
 
 The user works in fish shell and vim on Linux. Tailor suggestions accordingly \
 (fish syntax, not bash; vim-native ways of doing things).
@@ -104,6 +107,22 @@ def capture_pane(target: str, scrollback: int) -> str:
     return result.stdout.rstrip()
 
 
+def resolve_active_pane(own_pane: str | None) -> str | None:
+    """The active pane of the active window in this session, if it isn't us."""
+    result = subprocess.run(
+        ["tmux", "list-panes", "-s", "-F", "#{pane_id} #{pane_active} #{window_active}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[1] == "1" and parts[2] == "1":
+            return parts[0] if parts[0] != own_pane else None
+    return None
+
+
 def read_vim_state() -> dict | None:
     try:
         stat = VIM_STATE_FILE.stat()
@@ -148,12 +167,15 @@ def start_stdin_reader(inbox: "queue.Queue[str]") -> None:
 
 
 def build_snapshot(
-    pane_text: str, vim_state: dict | None, user_messages: list[str] | None = None
+    pane_text: str,
+    vim_state: dict | None,
+    user_messages: list[str] | None = None,
+    pane: str = "",
 ) -> str:
     parts = []
     for msg in user_messages or []:
         parts.append(f"<user_message>\n{msg}\n</user_message>")
-    parts.append(f"<terminal>\n{pane_text}\n</terminal>")
+    parts.append(f'<terminal pane="{pane}">\n{pane_text}\n</terminal>')
     if vim_state and vim_state.get("context"):
         first = vim_state.get("first_line", 1)
         lines = vim_state["context"]
@@ -341,8 +363,9 @@ def extract_code(reply: str) -> str:
 
 def watch(args: argparse.Namespace) -> None:
     printer = Printer()
+    mode = "pinned to" if args.pin else "following active pane, starting at"
     printer.banner(
-        f"claude-pair watching {args.target} "
+        f"claude-pair {mode} {args.target} "
         f"(model={args.model}, effort={args.effort}, debounce={args.debounce}s)"
     )
     printer.banner(
@@ -364,15 +387,34 @@ def watch(args: argparse.Namespace) -> None:
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     poll_inbox()  # discard messages queued before we started
 
+    own_pane = os.environ.get("TMUX_PANE")
+    target = args.target
+
     last_hash = None
     last_change_at = None
     analyzed_hash = None
     last_call_at = 0.0
 
     while True:
+        if not args.pin:
+            active = resolve_active_pane(own_pane)
+            if active and active != target:
+                target = active
+                printer.banner(f"→ following {target}")
+                # new pane: start change-detection fresh
+                last_hash = None
+                last_change_at = None
+                analyzed_hash = None
+
         try:
-            pane_text = capture_pane(args.target, args.scrollback)
+            pane_text = capture_pane(target, args.scrollback)
         except RuntimeError as exc:
+            if not args.pin:
+                # the watched pane went away; fall back until a new one is active
+                printer.banner(f"→ {target} closed; waiting for an active pane")
+                last_hash = None
+                time.sleep(args.interval)
+                continue
             printer.note(f"\nclaude-pair: {exc} (pane closed?) — exiting")
             return
 
@@ -394,7 +436,7 @@ def watch(args: argparse.Namespace) -> None:
         if direct or (pane_is_new and settled and cooled):
             analyzed_hash = digest
             last_call_at = now
-            snapshot = build_snapshot(pane_text, read_vim_state(), direct)
+            snapshot = build_snapshot(pane_text, read_vim_state(), direct, pane=target)
             if args.dry_run:
                 printer.divider()
                 printer.stream(snapshot + "\n")
@@ -522,7 +564,13 @@ def main() -> None:
         "`claude-pair say <message>` talks to a running watcher.",
     )
     parser.add_argument(
-        "--target", help="tmux pane to watch (e.g. %%3). Omit to auto-split."
+        "--target", help="tmux pane to start watching (e.g. %%3). Omit to auto-split."
+    )
+    parser.add_argument(
+        "--pin",
+        action="store_true",
+        help="stay on the launch/--target pane instead of following the "
+        "active pane as you move around",
     )
     parser.add_argument(
         "--model", default=os.environ.get("CLAUDE_PAIR_MODEL", DEFAULT_MODEL)

@@ -18,6 +18,10 @@ no-op), and pull the answer's code straight into vim with `<leader>cl`:
 
 ## How it works
 
+- Follows your **active pane**: whatever pane you're working in (across
+  windows too) is what it watches, re-resolved every poll. Its own side pane
+  is excluded, so clicking in to type it a message doesn't confuse it.
+  `--pin` locks it to the launch pane instead.
 - Polls `tmux capture-pane` about once a second (visible screen + a little
   scrollback, so it sees the command line as you type it).
 - When the pane content changes and then goes quiet for ~1.5s (debounced),
@@ -130,6 +134,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 
 | flag | default | meaning |
 |---|---|---|
+| `--pin` | off | watch only the launch/`--target` pane instead of following the active one |
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--theme` | `monokai` | pygments theme for code blocks (`dracula`, `ansi_dark`, …) |
