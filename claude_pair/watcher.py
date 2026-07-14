@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -462,12 +463,56 @@ def last(argv: list[str]) -> None:
     console.print(Markdown(text.strip(), code_theme="monokai"))
 
 
+def update() -> None:
+    """`claude-pair update` — pull the repo, reinstall, refresh vim-plug."""
+    repo = Path(__file__).resolve().parent.parent
+    console = Console(highlight=False)
+    if not (repo / ".git").is_dir():
+        sys.exit(
+            f"claude-pair: no git repo at {repo} (not an editable install?) — "
+            "update however you installed it"
+        )
+
+    console.print(f"→ git pull [dim]({repo})[/]", style="bold")
+    pull = subprocess.run(
+        ["git", "-C", str(repo), "pull", "--ff-only"],
+        capture_output=True,
+        text=True,
+    )
+    output = (pull.stdout + pull.stderr).strip()
+    console.print(output, style=None if pull.returncode == 0 else "red")
+    if pull.returncode != 0:
+        sys.exit(1)
+
+    if "Already up to date" not in output:
+        console.print("→ pip install -e .", style="bold")
+        pip = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "-e", str(repo)]
+        )
+        if pip.returncode != 0:
+            console.print("pip install failed — fix manually", style="red")
+
+    # vim-plug users have their own clone of this repo; refresh it too.
+    # `silent!` makes this a no-op for people who don't use vim-plug.
+    if shutil.which("vim") and sys.stdout.isatty():
+        console.print("→ vim +PlugUpdate", style="bold")
+        subprocess.run(["vim", "+silent! PlugUpdate --sync", "+qa"])
+    else:
+        console.print(
+            "skipping vim +PlugUpdate (no vim or not a terminal)", style="dim"
+        )
+    console.print("done ✻", style="bold green")
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "say":
         say(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "last":
         last(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] in ("update", "--update"):
+        update()
         return
 
     parser = argparse.ArgumentParser(

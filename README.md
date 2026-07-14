@@ -48,6 +48,16 @@ picks up the profile automatically.
 set -Ux ANTHROPIC_API_KEY sk-ant-...
 ```
 
+To update later:
+
+```sh
+claude-pair update
+```
+
+That pulls this repo, reinstalls if anything changed, and runs
+`vim +PlugUpdate` to refresh vim-plug's copy of the plugin (a no-op if you
+don't use vim-plug).
+
 ### Vim plugin
 
 Copy or symlink `vim/plugin/claude_pair.vim` into your plugin directory, or
