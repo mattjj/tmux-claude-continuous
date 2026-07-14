@@ -529,7 +529,7 @@ def update() -> None:
     if "Already up to date" not in output:
         console.print("→ pip install -e .", style="bold")
         pip = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", str(repo)]
+            [sys.executable, "-m", "pip", "install", "-q", "-e", str(repo), '--break-system-packages']
         )
         if pip.returncode != 0:
             console.print("pip install failed — fix manually", style="red")
