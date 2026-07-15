@@ -178,7 +178,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--think` | off | let the model think before answering (deeper, slower) |
-| `--fast` | off | Opus 4.8/4.7 fast mode: ~2.5x speed, premium price |
+| `--no-fast` | on | disable Opus fast mode (drop to standard speed/price) |
 | `--timing` | off | print time-to-first-token and total per call |
 | `--theme` | `monokai` | pygments theme for code blocks (`dracula`, `ansi_dark`, …) |
 | `--debounce` | `0.25` | seconds of quiet after a change before asking Claude |
@@ -218,17 +218,18 @@ model thinking, and model speed:
   tool rarely needs the model to reason first, and skipping it cuts the pause
   before the first token — especially on the common SKIP. `--think` turns it
   back on for a deeper (slower) session.
-- **`--fast`** uses Opus 4.8's fast mode (~2.5× output speed, premium price).
-  Great when you want to stay on Opus but hate waiting. (Opus 4.8/4.7 only;
-  ignored with a note on other models.)
+- **Fast mode is on by default** — Opus 4.8's fast mode (~2.5× output speed,
+  premium price). `--no-fast` drops to standard speed/price. (Opus 4.8/4.7
+  only; ignored with a note on other models.)
 - **`--timing`** prints `⧗ 0.9s→first · 1.4s total` after each call. If
   time-to-first-token is high, it's the network (a tether, a train); if TTFT
   is low but total is high, it's generation — try `--fast` or a smaller
   model.
 
 Snappiest of all is just a faster model — `--model claude-haiku-4-5` is still
-Claude, and dramatically quicker for this kind of quick-take task. `--fast`
-is the lever when you'd rather keep Opus's judgement and pay for speed.
+Claude, and dramatically quicker for this kind of quick-take task. Fast mode
+keeps Opus's judgement and pays for speed; it's the default, so the premium
+applies unless you pass `--no-fast`.
 
 ## Cost note
 

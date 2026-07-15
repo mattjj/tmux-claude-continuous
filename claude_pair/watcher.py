@@ -871,8 +871,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--fast",
-        action="store_true",
-        help="Opus 4.8/4.7 fast mode: ~2.5x output speed at premium pricing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Opus 4.8/4.7 fast mode: ~2.5x output speed at premium pricing "
+        "(default on; use --no-fast for standard speed/price)",
     )
     parser.add_argument(
         "--timing",
