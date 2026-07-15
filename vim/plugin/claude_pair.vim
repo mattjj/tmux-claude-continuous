@@ -50,6 +50,34 @@ augroup END
 command! ClaudePairToggle let g:claude_pair_enabled = !g:claude_pair_enabled
       \ | echo 'claude-pair vim state: ' . (g:claude_pair_enabled ? 'on' : 'off')
 
+" --- send the whole current file to claude-pair as reference context ------
+
+function! s:SendContext() abort
+  if empty(expand('%')) || !empty(&buftype)
+    echo 'claude-pair: no file to send'
+    return
+  endif
+  let l:dir = s:state_dir . '/context'
+  if !isdirectory(l:dir)
+    call mkdir(l:dir, 'p')
+  endif
+  let l:src = expand('%:p')
+  " deterministic name (matches the CLI's slug) so re-sending replaces
+  let l:slug = substitute(l:src, '[^A-Za-z0-9._-]', '_', 'g')
+  let l:slug = strpart(l:slug, max([0, len(l:slug) - 120]))
+  let l:body = ['# source: ' . l:src, '=== ' . l:src . ' ==='] + getline(1, '$')
+  call writefile(l:body, l:dir . '/' . l:slug . '.ctx')
+  echo 'claude-pair: sent ' . line('$') . ' lines as context'
+endfunction
+
+command! ClaudeContext call s:SendContext()
+
+nnoremap <silent> <Plug>(ClaudePairContext) :call <SID>SendContext()<CR>
+if get(g:, 'claude_pair_default_mappings', 1)
+      \ && !hasmapto('<Plug>(ClaudePairContext)') && empty(maparg('<Leader>cc', 'n'))
+  nmap <Leader>cc <Plug>(ClaudePairContext)
+endif
+
 " --- paste the latest suggestion's code at the cursor ----------------------
 
 function! s:PasteLast() abort

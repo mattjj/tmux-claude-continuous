@@ -112,6 +112,39 @@ Three ways to ask it something directly (direct messages are always answered
   last commit?` at the prompt — in fish that's a no-op comment, but the
   watcher sees it on screen and answers it once.
 
+### Loading extra context
+
+Give Claude reference material to consult — the file you're working in, or a
+few source files it should understand — beyond what's on screen. Loaded
+context is a *content snapshot* (captured when you load it) and rides along
+as a **prompt-cached prefix**, so after the first call it's billed at ~10% —
+cheap to keep loaded.
+
+- **At launch:** `claude-pair --context stats.py --context jax/_src/numpy/`
+  (repeatable; files or directories). Replaces any previously-loaded
+  context.
+- **While running, from any pane:**
+  ```fish
+  claude-pair context add path/to/file.py   # or a directory
+  claude-pair context list
+  claude-pair context clear
+  ```
+  The watcher picks up changes within a second (`→ context updated`).
+- **From vim:** `:ClaudeContext` (`<leader>cc`) sends the **whole current
+  file** — the full buffer, not just the cursor region the plugin streams by
+  default. Re-run it to refresh after big edits.
+
+Directories are walked with the usual noise skipped (`.git`,
+`__pycache__`, `node_modules`, binaries, …) up to `--context-budget` chars
+per path (default 120k ≈ 30k tokens); anything over budget is **skipped with
+a note**, never silently dropped.
+
+**On whole codebases:** a large library like jax (1M+ tokens) won't fit in
+context, so point `--context` at the *specific* files or subdirectory you're
+touching, not the whole tree — the budget guard protects you either way. And
+Claude already knows popular libraries like jax well from training, so you
+often only need to load *your* code, not theirs.
+
 ### Recalling the last suggestion
 
 Every real suggestion (not the `SKIP`s) is saved under `~/.cache/claude-pair/`:
@@ -140,6 +173,8 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 |---|---|---|
 | `--pin` | off | watch only the launch/`--target` pane instead of following the active one |
 | `--no-notify` | on | disable the tmux status-line ping when you're on another window |
+| `--context PATH` | — | file/dir to load as reference context (repeatable) |
+| `--context-budget` | `120000` | max chars loaded per context path |
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--theme` | `monokai` | pygments theme for code blocks (`dracula`, `ansi_dark`, …) |

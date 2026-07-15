@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -38,6 +39,13 @@ INBOX_DIR = CACHE_DIR / "inbox"  # `claude-pair say` drops messages here
 LAST_SUGGESTION_FILE = CACHE_DIR / "last_suggestion.txt"
 LAST_CODE_FILE = CACHE_DIR / "last_code.txt"  # just the fenced code blocks
 SUGGESTION_LOG = CACHE_DIR / "suggestions.log"
+CONTEXT_DIR = CACHE_DIR / "context"  # loaded reference files (content snapshots)
+DEFAULT_CONTEXT_BUDGET = 120_000  # chars per load (~30k tokens)
+CONTEXT_SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
+    ".pytest_cache", ".tox", ".ruff_cache", "dist", "build", ".idea",
+    ".ipynb_checkpoints", ".egg-info",
+}
 
 SYSTEM_PROMPT = """\
 You are an expert pair programmer quietly looking over the user's shoulder. \
@@ -51,6 +59,11 @@ not itself worth commenting on.
 
 The user works in fish shell and vim on Linux. Tailor suggestions accordingly \
 (fish syntax, not bash; vim-native ways of doing things).
+
+A <reference_context> block, when present, holds files or code the user \
+loaded for you to consult — background knowledge for understanding what \
+they're doing, not something to review or comment on line by line. Use it to \
+inform your suggestions about the pane and editor.
 
 Respond with exactly SKIP unless you have something genuinely worth \
 interrupting for, such as:
@@ -105,6 +118,126 @@ def capture_pane(target: str, scrollback: int) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "tmux capture-pane failed")
     return result.stdout.rstrip()
+
+
+# ---------------------------------------------------------------------------
+# reference context: files/dirs the user loads for Claude to consult
+
+
+def _read_text_file(path: Path) -> str | None:
+    """File contents as text, or None if it's binary/unreadable."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in data[:8192]:  # NUL byte → treat as binary
+        return None
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def gather_context(path: Path, budget: int) -> tuple[str, list[str]]:
+    """Concatenate a file or directory's text within a char budget.
+
+    Returns (text, notes) — notes describe what was skipped, so nothing is
+    silently dropped.
+    """
+    if path.is_dir():
+        files: list[Path] = []
+        for root, dirs, names in os.walk(path):
+            dirs[:] = sorted(
+                d for d in dirs
+                if d not in CONTEXT_SKIP_DIRS and not d.startswith(".")
+            )
+            files.extend(sorted(Path(root) / n for n in names))
+    else:
+        files = [path]
+
+    parts, used, skipped_binary, skipped_budget = [], 0, 0, []
+    for f in files:
+        text = _read_text_file(f)
+        if text is None:
+            skipped_binary += 1
+            continue
+        chunk = f"=== {f} ===\n{text}\n"
+        if used + len(chunk) > budget:
+            skipped_budget.append(str(f))
+            continue
+        parts.append(chunk)
+        used += len(chunk)
+
+    notes = []
+    if skipped_binary:
+        notes.append(f"skipped {skipped_binary} binary/unreadable file(s)")
+    if skipped_budget:
+        notes.append(
+            f"budget ({budget} chars) hit: skipped {len(skipped_budget)} "
+            f"file(s), e.g. {skipped_budget[0]}"
+        )
+    return "\n".join(parts), notes
+
+
+def _context_slug(source: str) -> str:
+    """Deterministic filename for a source, so re-adding it replaces it."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", source)[-120:] + ".ctx"
+
+
+def add_context_paths(paths: list[str], budget: int) -> list[str]:
+    """Snapshot each path's text into the context store. Returns status lines."""
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if not p.exists():
+            out.append(f"no such path: {raw}")
+            continue
+        p = p.resolve()
+        text, notes = gather_context(p, budget)
+        if not text.strip():
+            out.append(f"nothing readable in {raw}")
+            continue
+        dest = CONTEXT_DIR / _context_slug(str(p))
+        dest.write_text(f"# source: {p}\n{text}")
+        suffix = f" ({'; '.join(notes)})" if notes else ""
+        out.append(f"loaded {raw} [{len(text)} chars]{suffix}")
+    return out
+
+
+def load_context_text() -> str:
+    """The combined <reference_context> block from the store (empty if none)."""
+    try:
+        items = sorted(CONTEXT_DIR.glob("*.ctx"))
+    except OSError:
+        return ""
+    blocks = []
+    for f in items:
+        try:
+            blocks.append(f.read_text())
+        except OSError:
+            continue
+    if not blocks:
+        return ""
+    return "<reference_context>\n" + "\n\n".join(blocks) + "\n</reference_context>"
+
+
+def context_signature() -> tuple:
+    """Cheap fingerprint of the store, to detect changes without re-reading."""
+    try:
+        items = sorted(CONTEXT_DIR.glob("*.ctx"))
+    except OSError:
+        return ()
+    sig = []
+    for f in items:
+        try:
+            st = f.stat()
+            sig.append((f.name, int(st.st_mtime), st.st_size))
+        except OSError:
+            continue
+    return tuple(sig)
 
 
 def _window_visible(pane: str) -> bool:
@@ -293,7 +426,8 @@ class Suggester:
             while self.messages and self.messages[0]["role"] != "user":
                 self.messages.pop(0)
 
-    def suggest(self, snapshot: str) -> None:
+    def suggest(self, snapshot: str, context_text: str = "") -> None:
+        self.context_text = context_text
         self.messages.append({"role": "user", "content": snapshot})
         self._trim_history()
         try:
@@ -313,6 +447,13 @@ class Suggester:
             time.sleep(5)
 
     def _call(self) -> None:
+        # System = frozen prompt + (optional) loaded reference context, cached
+        # together as a stable prefix ahead of the volatile snapshots.
+        system = [{"type": "text", "text": SYSTEM_PROMPT}]
+        if getattr(self, "context_text", ""):
+            system.append({"type": "text", "text": self.context_text})
+        system[-1]["cache_control"] = {"type": "ephemeral"}
+
         buffered = ""
         live: Live | None = None
         try:
@@ -322,7 +463,7 @@ class Suggester:
                 thinking={"type": "adaptive"},
                 output_config={"effort": self.args.effort},
                 cache_control={"type": "ephemeral"},
-                system=SYSTEM_PROMPT,
+                system=system,
                 messages=self.messages,
             ) as stream:
                 for text in stream.text_stream:
@@ -425,6 +566,17 @@ def watch(args: argparse.Namespace) -> None:
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     poll_inbox()  # discard messages queued before we started
 
+    # --context replaces the store; without it, whatever was loaded persists
+    if args.context is not None:
+        for f in CONTEXT_DIR.glob("*.ctx"):
+            f.unlink()
+        for line in add_context_paths(args.context, args.context_budget):
+            printer.banner(f"context: {line}")
+    context_sig = context_signature()
+    context_text = load_context_text()
+    if context_text:
+        printer.banner(f"context: {len(context_text)} chars loaded")
+
     own_pane = os.environ.get("TMUX_PANE")
     target = args.target
 
@@ -462,6 +614,16 @@ def watch(args: argparse.Namespace) -> None:
             last_hash = digest
             last_change_at = now
 
+        # pick up context added/cleared live via `claude-pair context ...`
+        new_sig = context_signature()
+        if new_sig != context_sig:
+            context_sig = new_sig
+            context_text = load_context_text()
+            printer.banner(
+                f"→ context updated ({len(context_text)} chars)"
+                if context_text else "→ context cleared"
+            )
+
         # direct messages jump the queue: no debounce, no cooldown
         direct = poll_inbox()
         while not stdin_inbox.empty():
@@ -477,9 +639,11 @@ def watch(args: argparse.Namespace) -> None:
             snapshot = build_snapshot(pane_text, read_vim_state(), direct, pane=target)
             if args.dry_run:
                 printer.divider()
+                if context_text:
+                    printer.stream(f"[+{len(context_text)} chars context]\n")
                 printer.stream(snapshot + "\n")
             else:
-                suggester.suggest(snapshot)
+                suggester.suggest(snapshot, context_text)
 
         time.sleep(args.interval)
 
@@ -514,6 +678,32 @@ def say(words: list[str]) -> None:
         sys.exit("usage: claude-pair say <message>")
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     (INBOX_DIR / f"msg-{time.time_ns()}.txt").write_text(message)
+
+
+def context_cmd(argv: list[str]) -> None:
+    """`claude-pair context [add <path>... | clear | list]`."""
+    sub = argv[0] if argv else "list"
+    if sub == "add":
+        if len(argv) < 2:
+            sys.exit("usage: claude-pair context add <path>...")
+        for line in add_context_paths(argv[1:], DEFAULT_CONTEXT_BUDGET):
+            print(line)
+    elif sub == "clear":
+        removed = 0
+        for f in CONTEXT_DIR.glob("*.ctx"):
+            f.unlink()
+            removed += 1
+        print(f"context cleared ({removed} source(s))")
+    elif sub == "list":
+        items = sorted(CONTEXT_DIR.glob("*.ctx")) if CONTEXT_DIR.is_dir() else []
+        if not items:
+            print("no context loaded")
+            return
+        for f in items:
+            head = f.read_text().splitlines()[0].removeprefix("# source: ")
+            print(f"{head}  ({f.stat().st_size} chars)")
+    else:
+        sys.exit("usage: claude-pair context [add <path>... | clear | list]")
 
 
 def last(argv: list[str]) -> None:
@@ -591,6 +781,9 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "last":
         last(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "context":
+        context_cmd(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] in ("update", "--update"):
         update()
         return
@@ -616,6 +809,20 @@ def main() -> None:
         default=True,
         help="ping the tmux status line for suggestions when the watcher "
         "pane is on another window (default: on; use --no-notify to disable)",
+    )
+    parser.add_argument(
+        "--context",
+        action="append",
+        metavar="PATH",
+        help="file or directory to load as reference context (repeatable). "
+        "Replaces any previously-loaded context. Add more later while "
+        "running with `claude-pair context add <path>`.",
+    )
+    parser.add_argument(
+        "--context-budget",
+        type=int,
+        default=DEFAULT_CONTEXT_BUDGET,
+        help=f"max chars to load per path (default {DEFAULT_CONTEXT_BUDGET})",
     )
     parser.add_argument(
         "--model", default=os.environ.get("CLAUDE_PAIR_MODEL", DEFAULT_MODEL)
