@@ -91,6 +91,8 @@ written is wrong or headed somewhere bad.
 are in this conversation). If the situation hasn't changed, SKIP.
 - Don't guess at intent you can't see. If a command is ambiguous but \
 plausible, SKIP.
+- Respond with only the suggestion or SKIP — no preamble, no explanation of \
+your reasoning, no "let me look". Get straight to it.
 - When you do speak: at most 3 short bullets ("- "), most important first. \
 Simple markdown only: bullets, `inline code`, and fenced code blocks with a \
 language tag (```fish, ```python, ```vim) for commands, snippets, and \
@@ -402,6 +404,11 @@ class Printer:
         # quiet heartbeat for SKIP responses
         self.console.print("·", style="dim", end="")
 
+    def timing(self, ttft: float, total: float) -> None:
+        self.console.print(
+            f" [⧗ {ttft:.1f}s→first · {total:.1f}s total]", style="dim", end=""
+        )
+
 
 # ---------------------------------------------------------------------------
 # Claude
@@ -454,19 +461,30 @@ class Suggester:
             system.append({"type": "text", "text": self.context_text})
         system[-1]["cache_control"] = {"type": "ephemeral"}
 
+        kwargs = dict(
+            model=self.args.model,
+            max_tokens=4000,
+            thinking={"type": "adaptive"} if self.args.think else {"type": "disabled"},
+            output_config={"effort": self.args.effort},
+            cache_control={"type": "ephemeral"},
+            system=system,
+            messages=self.messages,
+        )
+        stream_fn = self.client.messages.stream
+        if self.args.fast:  # Opus 4.8/4.7 fast mode: ~2.5x tok/s, premium price
+            stream_fn = self.client.beta.messages.stream
+            kwargs["speed"] = "fast"
+            kwargs["betas"] = ["fast-mode-2026-02-01"]
+
         buffered = ""
         live: Live | None = None
+        t0 = time.monotonic()
+        t_first: float | None = None
         try:
-            with self.client.messages.stream(
-                model=self.args.model,
-                max_tokens=4000,
-                thinking={"type": "adaptive"},
-                output_config={"effort": self.args.effort},
-                cache_control={"type": "ephemeral"},
-                system=system,
-                messages=self.messages,
-            ) as stream:
+            with stream_fn(**kwargs) as stream:
                 for text in stream.text_stream:
+                    if t_first is None:
+                        t_first = time.monotonic()
                     buffered += text
                     if live is None:
                         stripped = buffered.lstrip()
@@ -496,6 +514,9 @@ class Suggester:
             self._save_suggestion(reply)
             if self.args.notify:
                 notify_status(self.own_pane, summarize(reply))
+
+        if self.args.timing and t_first is not None:
+            self.printer.timing(t_first - t0, time.monotonic() - t0)
 
         # keep the assistant turn (including SKIP) so the model knows what it
         # already said and doesn't repeat itself
@@ -542,10 +563,18 @@ def extract_code(reply: str) -> str:
 
 def watch(args: argparse.Namespace) -> None:
     printer = Printer()
+    if args.fast and args.model not in ("claude-opus-4-8", "claude-opus-4-7"):
+        printer.note(f"--fast needs Opus 4.8/4.7; ignoring it for {args.model}")
+        args.fast = False
     mode = "pinned to" if args.pin else "following active pane, starting at"
+    flags = []
+    if args.fast:
+        flags.append("fast")
+    flags.append("thinking" if args.think else "no-think")
     printer.banner(
         f"claude-pair {mode} {args.target} "
-        f"(model={args.model}, effort={args.effort}, debounce={args.debounce}s)"
+        f"(model={args.model}, effort={args.effort}, {', '.join(flags)}, "
+        f"debounce={args.debounce}s)"
     )
     printer.banner(
         "talk to me: type here + Enter, run `claude-pair say ...`, "
@@ -832,6 +861,24 @@ def main() -> None:
         default="low",
         choices=["low", "medium", "high", "xhigh", "max"],
         help="reasoning effort per suggestion (default: low, for snappiness)",
+    )
+    parser.add_argument(
+        "--think",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="let the model think before answering (slower, sometimes deeper; "
+        "default off for snappier first-token latency)",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Opus 4.8/4.7 fast mode: ~2.5x output speed at premium pricing",
+    )
+    parser.add_argument(
+        "--timing",
+        action="store_true",
+        help="print time-to-first-token and total per call (diagnose "
+        "network vs. model latency)",
     )
     parser.add_argument(
         "--theme",
