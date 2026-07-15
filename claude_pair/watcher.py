@@ -473,18 +473,29 @@ class Suggester:
         )
 
         use_fast = self.args.fast and time.monotonic() >= self.fast_paused_until
-        try:
-            self._stream(kwargs, use_fast)
-        except self.anthropic.RateLimitError:
-            if not use_fast:
-                raise  # standard-pool 429 — let suggest() pause and drop it
-            # fast pool exhausted: back off fast, retry this one at standard now
-            self.fast_paused_until = time.monotonic() + self.args.fast_backoff
-            self.printer.note(
-                f"[fast mode rate-limited; standard speed for "
-                f"{self.args.fast_backoff:g}s]"
-            )
-            self._stream(kwargs, use_fast=False)
+        if use_fast:
+            try:
+                self._stream(kwargs, use_fast=True)
+                return
+            except self.anthropic.RateLimitError:
+                # fast pool exhausted: back off fast temporarily
+                self.fast_paused_until = time.monotonic() + self.args.fast_backoff
+                self.printer.note(
+                    f"[fast mode rate-limited; standard speed for "
+                    f"{self.args.fast_backoff:g}s]"
+                )
+            except (
+                self.anthropic.PermissionDeniedError,
+                self.anthropic.BadRequestError,
+            ) as exc:
+                # not approved / unsupported: stop trying fast this session
+                self.args.fast = False
+                self.printer.note(
+                    f"[fast mode unavailable ({exc.status_code}); "
+                    "standard speed for the rest of this session]"
+                )
+            # fall through and retry this suggestion at standard speed
+        self._stream(kwargs, use_fast=False)
 
     def _stream(self, base_kwargs: dict, use_fast: bool) -> None:
         kwargs = dict(base_kwargs)
@@ -889,10 +900,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--fast",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
         help="Opus 4.8/4.7 fast mode: ~2.5x output speed at premium pricing "
-        "(default on; use --no-fast for standard speed/price)",
+        "(requires fast-mode access on your account)",
     )
     parser.add_argument(
         "--fast-backoff",
