@@ -423,6 +423,7 @@ class Suggester:
         self.args = args
         self.printer = printer
         self.own_pane = os.environ.get("TMUX_PANE")
+        self.fast_paused_until = 0.0  # monotonic time until which fast is skipped
         self.messages: list[dict] = []
 
     def _trim_history(self) -> None:
@@ -470,8 +471,25 @@ class Suggester:
             system=system,
             messages=self.messages,
         )
+
+        use_fast = self.args.fast and time.monotonic() >= self.fast_paused_until
+        try:
+            self._stream(kwargs, use_fast)
+        except self.anthropic.RateLimitError:
+            if not use_fast:
+                raise  # standard-pool 429 — let suggest() pause and drop it
+            # fast pool exhausted: back off fast, retry this one at standard now
+            self.fast_paused_until = time.monotonic() + self.args.fast_backoff
+            self.printer.note(
+                f"[fast mode rate-limited; standard speed for "
+                f"{self.args.fast_backoff:g}s]"
+            )
+            self._stream(kwargs, use_fast=False)
+
+    def _stream(self, base_kwargs: dict, use_fast: bool) -> None:
+        kwargs = dict(base_kwargs)
         stream_fn = self.client.messages.stream
-        if self.args.fast:  # Opus 4.8/4.7 fast mode: ~2.5x tok/s, premium price
+        if use_fast:  # Opus 4.8/4.7 fast mode: ~2.5x tok/s, premium price
             stream_fn = self.client.beta.messages.stream
             kwargs["speed"] = "fast"
             kwargs["betas"] = ["fast-mode-2026-02-01"]
@@ -875,6 +893,13 @@ def main() -> None:
         default=True,
         help="Opus 4.8/4.7 fast mode: ~2.5x output speed at premium pricing "
         "(default on; use --no-fast for standard speed/price)",
+    )
+    parser.add_argument(
+        "--fast-backoff",
+        type=float,
+        default=60.0,
+        help="after a fast-mode rate limit, use standard speed for this many "
+        "seconds before trying fast again (default 60)",
     )
     parser.add_argument(
         "--timing",

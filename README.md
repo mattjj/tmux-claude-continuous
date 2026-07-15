@@ -179,6 +179,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--think` | off | let the model think before answering (deeper, slower) |
 | `--no-fast` | on | disable Opus fast mode (drop to standard speed/price) |
+| `--fast-backoff` | `60` | seconds at standard speed after a fast-mode rate limit |
 | `--timing` | off | print time-to-first-token and total per call |
 | `--theme` | `monokai` | pygments theme for code blocks (`dracula`, `ansi_dark`, …) |
 | `--debounce` | `0.25` | seconds of quiet after a change before asking Claude |
@@ -220,7 +221,11 @@ model thinking, and model speed:
   back on for a deeper (slower) session.
 - **Fast mode is on by default** — Opus 4.8's fast mode (~2.5× output speed,
   premium price). `--no-fast` drops to standard speed/price. (Opus 4.8/4.7
-  only; ignored with a note on other models.)
+  only; ignored with a note on other models.) Fast mode has its own rate
+  limit; when you hit it, the watcher **automatically falls back to standard
+  speed** for `--fast-backoff` seconds (default 60) — the current suggestion
+  is retried at standard speed right away, then it re-probes fast after the
+  window. So a fast-pool rate limit degrades instead of stalling.
 - **`--timing`** prints `⧗ 0.9s→first · 1.4s total` after each call. If
   time-to-first-token is high, it's the network (a tether, a train); if TTFT
   is low but total is high, it's generation — try `--fast` or a smaller
