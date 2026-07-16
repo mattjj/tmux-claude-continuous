@@ -39,6 +39,8 @@ INBOX_DIR = CACHE_DIR / "inbox"  # `claude-pair say` drops messages here
 LAST_SUGGESTION_FILE = CACHE_DIR / "last_suggestion.txt"
 LAST_CODE_FILE = CACHE_DIR / "last_code.txt"  # just the fenced code blocks
 SUGGESTION_LOG = CACHE_DIR / "suggestions.log"
+PANE_FILE = CACHE_DIR / "pane"  # the running watcher's own tmux pane id
+HIDDEN_WINDOW = "_claude_pair"  # holding window for a hidden watcher pane
 CONTEXT_DIR = CACHE_DIR / "context"  # loaded reference files (content snapshots)
 DEFAULT_CONTEXT_BUDGET = 120_000  # chars per load (~30k tokens)
 CONTEXT_SKIP_DIRS = {
@@ -291,6 +293,65 @@ def resolve_active_pane(own_pane: str | None) -> str | None:
         if len(parts) == 3 and parts[1] == "1" and parts[2] == "1":
             return parts[0] if parts[0] != own_pane else None
     return None
+
+
+def _tmux(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+
+def pane_cmd(argv: list[str], width: int = 60) -> None:
+    """`claude-pair hide|show|toggle` — stash/restore the watcher pane."""
+    action = argv[0] if argv else "toggle"
+    if action not in ("hide", "show", "toggle"):
+        sys.exit("usage: claude-pair [hide | show | toggle]")
+
+    try:
+        pane = PANE_FILE.read_text().strip()
+    except OSError:
+        pane = ""
+    if not pane:
+        sys.exit("claude-pair: no running watcher found")
+
+    # a dead pane id makes tmux fall back to the current pane, so verify it
+    # actually exists rather than trusting display-message's target
+    live = _tmux("list-panes", "-a", "-F", "#{pane_id}")
+    if pane not in live.stdout.split():
+        PANE_FILE.unlink(missing_ok=True)
+        sys.exit("claude-pair: the watcher pane is gone (cleared stale record)")
+
+    info = _tmux("display-message", "-p", "-t", pane,
+                 "#{window_name}\t#{window_panes}")
+    if info.returncode != 0:
+        sys.exit("claude-pair: the watcher pane is gone")
+    window_name, _, panes = info.stdout.strip().partition("\t")
+    hidden = window_name == HIDDEN_WINDOW
+
+    if action == "toggle":
+        action = "show" if hidden else "hide"
+
+    if action == "hide":
+        if hidden:
+            print("claude-pair: already hidden")
+            return
+        if panes.strip() == "1":
+            sys.exit("claude-pair: watcher is the only pane in its window; "
+                     "nothing to reclaim by hiding")
+        r = _tmux("break-pane", "-d", "-s", pane, "-n", HIDDEN_WINDOW)
+        if r.returncode != 0:
+            sys.exit(f"claude-pair: {r.stderr.strip()}")
+        print("claude-pair: pane hidden (still running) — `claude-pair show`")
+    else:  # show
+        if not hidden:
+            print("claude-pair: already visible")
+            return
+        dst = os.environ.get("TMUX_PANE")
+        cmd = ["join-pane", "-h", "-l", str(width), "-s", pane]
+        if dst:
+            cmd += ["-t", dst]
+        r = _tmux(*cmd)
+        if r.returncode != 0:
+            sys.exit(f"claude-pair: {r.stderr.strip()}")
+        print("claude-pair: pane restored")
 
 
 def read_vim_state() -> dict | None:
@@ -636,6 +697,11 @@ def watch(args: argparse.Namespace) -> None:
         printer.banner(f"context: {len(context_text)} chars loaded")
 
     own_pane = os.environ.get("TMUX_PANE")
+    if own_pane:  # let `claude-pair hide/show/toggle` find this watcher
+        try:
+            PANE_FILE.write_text(own_pane)
+        except OSError:
+            pass
     target = args.target
 
     last_hash = None
@@ -842,6 +908,9 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "context":
         context_cmd(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] in ("hide", "show", "toggle"):
+        pane_cmd(sys.argv[1:2])
+        return
     if len(sys.argv) > 1 and sys.argv[1] in ("update", "--update"):
         update()
         return
@@ -964,6 +1033,8 @@ def main() -> None:
             watch(args)
         except KeyboardInterrupt:
             print("\nclaude-pair: bye")
+        finally:
+            PANE_FILE.unlink(missing_ok=True)
     else:
         # forward every flag except --width to the inner invocation
         extra: list[str] = []

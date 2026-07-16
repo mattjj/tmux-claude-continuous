@@ -99,6 +99,27 @@ claude-pair
 That splits a 60-column side pane (focus stays where you are) and starts
 watching. Ctrl-C in the side pane (or just kill the pane) stops it.
 
+### Hiding and showing the pane
+
+Reclaim the screen space without stopping the watcher — it keeps running and
+following you while hidden, and any suggestions are waiting when you bring it
+back (plus the status-line ping fires while it's out of view):
+
+```fish
+claude-pair hide     # stash the pane into a holding window
+claude-pair show     # bring it back next to your current pane
+claude-pair toggle   # whichever applies
+```
+
+A one-key toggle in `~/.tmux.conf`:
+
+```tmux
+bind h run-shell "claude-pair toggle"   # prefix + h hides/shows claude-pair
+```
+
+(Under the hood it's tmux `break-pane`/`join-pane`; the process never
+restarts, so conversation history and loaded context survive.)
+
 ### Talking to it
 
 Three ways to ask it something directly (direct messages are always answered
