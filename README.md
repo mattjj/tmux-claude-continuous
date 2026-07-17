@@ -200,6 +200,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 | `--no-notify` | on | disable the tmux status-line ping when you're on another window |
 | `--context PATH` | — | file/dir to load as reference context (repeatable) |
 | `--context-budget` | `120000` | max chars loaded per context path |
+| `--away` | `60` | minutes of inactivity before a welcome-back recap (0 = off) |
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--think` | off | let the model think before answering (deeper, slower) |
@@ -220,6 +221,19 @@ A tmux binding makes it one keystroke:
 # ~/.tmux.conf — prefix + P starts the pair programmer for the current pane
 bind P run-shell "tmux send-keys 'claude-pair' Enter"
 ```
+
+### Welcome-back recaps
+
+Step away for an hour and the first thing Claude does when you return is
+re-ground you: what you were working on, the state you left it in (that test
+still failing, that command half-typed), and a suggested next step — drawn
+from its memory of your last snapshots before the break. Tune with
+`--away MINUTES` (default 60; `0` disables).
+
+Away time is measured by your last real tmux keypress (`#{client_activity}`),
+so background output landing in a pane while you're gone doesn't count as
+"you're back" — and it's wall-clock based, so suspending your laptop counts
+as being away.
 
 ## Tips
 

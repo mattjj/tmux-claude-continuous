@@ -76,6 +76,15 @@ interrupting for, such as:
 - a meaningfully faster way to do what they are obviously trying to do
 - a quick implementation of code they are trying to write
 
+A <returned after_minutes=N> marker means the user just came back from a \
+break. Do not SKIP that snapshot: give a brief re-grounding instead — 1) \
+what they were working on before the break (use the earlier snapshots in \
+this conversation), 2) the state they left it in (done, failing, half-typed), \
+3) a suggested next step. A few short lines; write it as a re-grounding for \
+someone who has lost their mental context, not a continuation. If you have \
+no pre-break snapshots to draw on, just say you're watching again and skip \
+the recap.
+
 The user can also talk to you directly:
 - A <user_message> block in a snapshot is the user addressing you. Always \
 answer it — never SKIP a snapshot that contains one. Be concise but complete; \
@@ -282,6 +291,15 @@ def notify_status(own_pane: str | None, summary: str) -> None:
     _display_message("✻ claude-pair: " + summary + "  (:cl / claude-pair last)")
 
 
+def client_activity_wall() -> float | None:
+    """Epoch time of the user's last keypress in the attached client, if any."""
+    r = _tmux("display-message", "-p", "#{client_activity}")
+    value = r.stdout.strip()
+    if r.returncode != 0 or not value.isdigit() or int(value) == 0:
+        return None
+    return float(value)
+
+
 def resolve_active_pane(own_pane: str | None) -> str | None:
     """The active pane of the active window in this session, if it isn't us."""
     result = subprocess.run(
@@ -431,8 +449,11 @@ def build_snapshot(
     vim_state: dict | None,
     user_messages: list[str] | None = None,
     pane: str = "",
+    returned_minutes: float | None = None,
 ) -> str:
     parts = []
+    if returned_minutes is not None:
+        parts.append(f"<returned after_minutes={int(returned_minutes)}>")
     for msg in user_messages or []:
         parts.append(f"<user_message>\n{msg}\n</user_message>")
     parts.append(f'<terminal pane="{pane}">\n{pane_text}\n</terminal>')
@@ -738,10 +759,35 @@ def watch(args: argparse.Namespace) -> None:
     analyzed_hash = None
     last_call_at = 0.0
 
+    # away detection uses wall-clock time: monotonic clocks don't advance
+    # during laptop suspend, which is exactly the "stepped away" case.
+    # tmux's #{client_activity} (last real keypress) is the primary signal —
+    # it ignores background output landing in the pane while the user is
+    # gone; pane changes are the fallback when no client is attached.
+    away_secs = args.away * 60
+    last_activity_wall = time.time()
+    returned_minutes: float | None = None
+    have_client = False
+
+    def note_activity(now_wall: float) -> None:
+        nonlocal last_activity_wall, returned_minutes
+        gap = now_wall - last_activity_wall
+        if away_secs > 0 and gap >= away_secs:
+            returned_minutes = gap / 60
+            printer.banner(f"→ welcome back ({int(returned_minutes)} min away)")
+        last_activity_wall = max(last_activity_wall, now_wall)
+
     while True:
+        act = client_activity_wall()
+        have_client = act is not None
+        if have_client and act > last_activity_wall:
+            note_activity(act)
+
         if not args.pin:
             active = resolve_active_pane(own_pane)
             if active and active != target:
+                if not have_client:  # infer activity from the switch itself
+                    note_activity(time.time())
                 target = active
                 printer.banner(f"→ following {target}")
                 # new pane: start change-detection fresh
@@ -764,6 +810,8 @@ def watch(args: argparse.Namespace) -> None:
         digest = hashlib.sha256(pane_text.encode()).hexdigest()
         now = time.monotonic()
         if digest != last_hash:
+            if not have_client and last_hash is not None:
+                note_activity(time.time())  # fallback: change implies activity
             last_hash = digest
             last_change_at = now
 
@@ -789,7 +837,11 @@ def watch(args: argparse.Namespace) -> None:
         if direct or (pane_is_new and settled and cooled):
             analyzed_hash = digest
             last_call_at = now
-            snapshot = build_snapshot(pane_text, read_vim_state(), direct, pane=target)
+            snapshot = build_snapshot(
+                pane_text, read_vim_state(), direct, pane=target,
+                returned_minutes=returned_minutes,
+            )
+            returned_minutes = None
             if args.dry_run:
                 printer.divider()
                 if context_text:
@@ -965,6 +1017,14 @@ def main() -> None:
         default=True,
         help="ping the tmux status line for suggestions when the watcher "
         "pane is on another window (default: on; use --no-notify to disable)",
+    )
+    parser.add_argument(
+        "--away",
+        type=float,
+        default=60.0,
+        metavar="MINUTES",
+        help="after this many minutes of inactivity, greet your return with "
+        "a recap of what you were doing (default 60; 0 disables)",
     )
     parser.add_argument(
         "--context",
