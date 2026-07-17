@@ -264,19 +264,22 @@ def summarize(reply: str) -> str:
     return "new suggestion"
 
 
+def _display_message(text: str, duration_ms: int = 4000) -> None:
+    """Show a tmux status-line message ('#' doubled to defeat expansion)."""
+    text = text.replace("#", "##")
+    # -d sets duration (tmux >= 3.2); fall back to the user's display-time
+    if subprocess.run(
+        ["tmux", "display-message", "-d", str(duration_ms), text],
+        capture_output=True,
+    ).returncode != 0:
+        subprocess.run(["tmux", "display-message", text], capture_output=True)
+
+
 def notify_status(own_pane: str | None, summary: str) -> None:
     """Ping the tmux status line if the watcher's pane isn't on screen."""
     if not own_pane or _window_visible(own_pane):
         return
-    # '#' is the tmux format-expansion char; double it so summaries render raw
-    text = ("✻ claude-pair: " + summary + "  (:cl / claude-pair last)").replace(
-        "#", "##"
-    )
-    # -d sets duration (tmux >= 3.2); fall back to the user's display-time
-    if subprocess.run(
-        ["tmux", "display-message", "-d", "4000", text], capture_output=True
-    ).returncode != 0:
-        subprocess.run(["tmux", "display-message", text], capture_output=True)
+    _display_message("✻ claude-pair: " + summary + "  (:cl / claude-pair last)")
 
 
 def resolve_active_pane(own_pane: str | None) -> str | None:
@@ -300,29 +303,52 @@ def _tmux(*args: str) -> subprocess.CompletedProcess:
 
 
 def pane_cmd(argv: list[str], width: int = 60) -> None:
-    """`claude-pair hide|show|toggle` — stash/restore the watcher pane."""
+    """`claude-pair hide|show|toggle` — stash/restore the watcher pane.
+
+    Typed in a shell, messages print normally. Run from a tmux binding
+    (`bind h run-shell "claude-pair toggle"`), stdout must stay EMPTY —
+    any run-shell output opens tmux's view-mode overlay that has to be
+    dismissed — so messages go to the status line instead, and we exit 0
+    even on errors (nonzero can pop the overlay too).
+    """
+    interactive = sys.stdout.isatty()
+
+    def report(msg: str, fail: bool = False) -> None:
+        if interactive:
+            print(msg, file=sys.stderr if fail else sys.stdout)
+            if fail:
+                sys.exit(1)
+        else:
+            _display_message(msg, duration_ms=2000)
+            if fail:
+                sys.exit(0)  # deliberate: keep run-shell quiet
+
     action = argv[0] if argv else "toggle"
     if action not in ("hide", "show", "toggle"):
-        sys.exit("usage: claude-pair [hide | show | toggle]")
+        report("usage: claude-pair [hide | show | toggle]", fail=True)
+        return
 
     try:
         pane = PANE_FILE.read_text().strip()
     except OSError:
         pane = ""
     if not pane:
-        sys.exit("claude-pair: no running watcher found")
+        report("claude-pair: no running watcher found", fail=True)
+        return
 
     # a dead pane id makes tmux fall back to the current pane, so verify it
     # actually exists rather than trusting display-message's target
     live = _tmux("list-panes", "-a", "-F", "#{pane_id}")
     if pane not in live.stdout.split():
         PANE_FILE.unlink(missing_ok=True)
-        sys.exit("claude-pair: the watcher pane is gone (cleared stale record)")
+        report("claude-pair: the watcher pane is gone", fail=True)
+        return
 
     info = _tmux("display-message", "-p", "-t", pane,
                  "#{window_name}\t#{window_panes}")
     if info.returncode != 0:
-        sys.exit("claude-pair: the watcher pane is gone")
+        report("claude-pair: the watcher pane is gone", fail=True)
+        return
     window_name, _, panes = info.stdout.strip().partition("\t")
     hidden = window_name == HIDDEN_WINDOW
 
@@ -331,18 +357,20 @@ def pane_cmd(argv: list[str], width: int = 60) -> None:
 
     if action == "hide":
         if hidden:
-            print("claude-pair: already hidden")
+            report("claude-pair: already hidden")
             return
         if panes.strip() == "1":
-            sys.exit("claude-pair: watcher is the only pane in its window; "
-                     "nothing to reclaim by hiding")
+            report("claude-pair: watcher is the only pane in its window; "
+                   "nothing to reclaim by hiding", fail=True)
+            return
         r = _tmux("break-pane", "-d", "-s", pane, "-n", HIDDEN_WINDOW)
         if r.returncode != 0:
-            sys.exit(f"claude-pair: {r.stderr.strip()}")
-        print("claude-pair: pane hidden (still running) — `claude-pair show`")
+            report(f"claude-pair: {r.stderr.strip()}", fail=True)
+            return
+        report("✻ claude-pair hidden (still running)")
     else:  # show
         if not hidden:
-            print("claude-pair: already visible")
+            report("claude-pair: already visible")
             return
         dst = os.environ.get("TMUX_PANE")
         cmd = ["join-pane", "-h", "-l", str(width), "-s", pane]
@@ -350,8 +378,9 @@ def pane_cmd(argv: list[str], width: int = 60) -> None:
             cmd += ["-t", dst]
         r = _tmux(*cmd)
         if r.returncode != 0:
-            sys.exit(f"claude-pair: {r.stderr.strip()}")
-        print("claude-pair: pane restored")
+            report(f"claude-pair: {r.stderr.strip()}", fail=True)
+            return
+        report("✻ claude-pair shown")
 
 
 def read_vim_state() -> dict | None:

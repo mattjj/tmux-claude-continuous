@@ -117,6 +117,10 @@ A one-key toggle in `~/.tmux.conf`:
 bind h run-shell "claude-pair toggle"   # prefix + h hides/shows claude-pair
 ```
 
+When run from a binding like this, confirmations (`✻ claude-pair hidden`)
+appear briefly on the tmux status line — never as the blocking view-mode
+overlay that needs dismissing. Typed in a shell, they print normally.
+
 (Under the hood it's tmux `break-pane`/`join-pane`; the process never
 restarts, so conversation history and loaded context survive.)
 
