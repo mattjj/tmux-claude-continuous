@@ -39,6 +39,12 @@ INBOX_DIR = CACHE_DIR / "inbox"  # `claude-pair say` drops messages here
 LAST_SUGGESTION_FILE = CACHE_DIR / "last_suggestion.txt"
 LAST_CODE_FILE = CACHE_DIR / "last_code.txt"  # just the fenced code blocks
 SUGGESTION_LOG = CACHE_DIR / "suggestions.log"
+DATA_DIR = (
+    Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    / "claude-pair"
+)
+JOURNAL_FILE = DATA_DIR / "journal.md"  # running human-readable activity log
+
 PANE_FILE = CACHE_DIR / "pane"  # the running watcher's own tmux pane id
 HIDDEN_WINDOW = "_claude_pair"  # holding window for a hidden watcher pane
 CONTEXT_DIR = CACHE_DIR / "context"  # loaded reference files (content snapshots)
@@ -76,6 +82,20 @@ interrupting for, such as:
 - a meaningfully faster way to do what they are obviously trying to do
 - a quick implementation of code they are trying to write
 
+Running journal: you also maintain a human-readable log of what the user \
+gets done. When a snapshot shows newly *completed* activity — a command ran \
+(note its outcome), tests passed or failed, a file was saved, a task hit a \
+milestone — start your reply with exactly one line:
+NOTE: <what happened, past tense, from the user's perspective, ≤100 chars>
+then continue with SKIP or your bullets on the next line. The NOTE goes to \
+the journal file, not the suggestion pane, and it's the user's log — "ran \
+pytest: 3 failures in test_stats", not commentary about yourself. No NOTE \
+while they're mid-typing, and never repeat a NOTE you already made (your \
+earlier replies show them). Most snapshots need no NOTE.
+A <journal_recent> block, when present, is the tail of that journal — it \
+appears when you may lack context (session start, after a break); use it to \
+understand what the user has been doing.
+
 A <returned after_minutes=N> marker means the user just came back from a \
 break. Do not SKIP that snapshot: give a brief re-grounding instead — 1) \
 what they were working on before the break (use the earlier snapshots in \
@@ -102,8 +122,8 @@ written is wrong or headed somewhere bad.
 are in this conversation). If the situation hasn't changed, SKIP.
 - Don't guess at intent you can't see. If a command is ambiguous but \
 plausible, SKIP.
-- Respond with only the suggestion or SKIP — no preamble, no explanation of \
-your reasoning, no "let me look". Get straight to it.
+- Respond with only the suggestion or SKIP (after the optional NOTE line) — \
+no preamble, no explanation of your reasoning, no "let me look".
 - When you do speak: at most 3 short bullets ("- "), most important first. \
 Simple markdown only: bullets, `inline code`, and fenced code blocks with a \
 language tag (```fish, ```python, ```vim) for commands, snippets, and \
@@ -131,6 +151,58 @@ def capture_pane(target: str, scrollback: int) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "tmux capture-pane failed")
     return result.stdout.rstrip()
+
+
+# ---------------------------------------------------------------------------
+# running journal: NOTE lines the model emits about completed activity
+
+
+def split_note(reply: str) -> tuple[str | None, str]:
+    """Separate a leading 'NOTE: ...' line from the visible reply body."""
+    s = reply.lstrip()
+    first, _, rest = s.partition("\n")
+    if first.upper().startswith("NOTE:"):
+        return first[5:].strip(), rest.strip()
+    return None, reply.strip()
+
+
+def journal_append(note: str) -> None:
+    """Append one entry, adding a date header when the day changes."""
+    if not note:
+        return
+    try:
+        JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            header_needed = f"## {today}" not in JOURNAL_FILE.read_text()[-4096:]
+        except OSError:
+            header_needed = True
+        with JOURNAL_FILE.open("a") as f:
+            if header_needed:
+                f.write(f"\n## {today}\n\n")
+            f.write(f"- {datetime.now():%H:%M} {note.strip()}\n")
+    except OSError:
+        pass  # journaling is best-effort; never break the watcher
+
+
+def journal_tail(lines: int = 30) -> str:
+    try:
+        content = JOURNAL_FILE.read_text()
+    except OSError:
+        return ""
+    return "\n".join(content.splitlines()[-lines:]).strip()
+
+
+def journal_cmd(argv: list[str]) -> None:
+    """`claude-pair journal [N]` — show the last N journal lines (default 25)."""
+    n = int(argv[0]) if argv and argv[0].isdigit() else 25
+    console = Console(highlight=False)
+    try:
+        lines = JOURNAL_FILE.read_text().splitlines()
+    except OSError:
+        sys.exit(f"claude-pair: no journal yet (will appear at {JOURNAL_FILE})")
+    console.print(str(JOURNAL_FILE), style="dim")
+    console.print(Markdown("\n".join(lines[-n:])))
 
 
 # ---------------------------------------------------------------------------
@@ -450,10 +522,13 @@ def build_snapshot(
     user_messages: list[str] | None = None,
     pane: str = "",
     returned_minutes: float | None = None,
+    journal: str = "",
 ) -> str:
     parts = []
     if returned_minutes is not None:
         parts.append(f"<returned after_minutes={int(returned_minutes)}>")
+    if journal:
+        parts.append(f"<journal_recent>\n{journal}\n</journal_recent>")
     for msg in user_messages or []:
         parts.append(f"<user_message>\n{msg}\n</user_message>")
     parts.append(f'<terminal pane="{pane}">\n{pane_text}\n</terminal>')
@@ -616,7 +691,9 @@ class Suggester:
             kwargs["speed"] = "fast"
             kwargs["betas"] = ["fast-mode-2026-02-01"]
 
-        buffered = ""
+        buffered = ""  # raw stream, possibly starting with a NOTE: line
+        body = ""      # visible part (NOTE stripped) — drives SKIP/rendering
+        note_done = False
         live: Live | None = None
         t0 = time.monotonic()
         t_first: float | None = None
@@ -626,8 +703,20 @@ class Suggester:
                     if t_first is None:
                         t_first = time.monotonic()
                     buffered += text
+                    if not note_done:
+                        s = buffered.lstrip()
+                        if s and not "NOTE:".startswith(s[:5].upper()):
+                            note_done, body = True, s  # not a journal line
+                        elif "\n" in s:
+                            first, _, rest = s.partition("\n")
+                            note_done = True
+                            body = rest if first.upper().startswith("NOTE:") else s
+                        else:
+                            continue  # can't tell yet — keep buffering
+                    else:
+                        body += text
                     if live is None:
-                        stripped = buffered.lstrip()
+                        stripped = body.lstrip()
                         if stripped and not "SKIP".startswith(stripped[:4].upper()):
                             # definitely not a SKIP — start rendering it
                             self.printer.divider()
@@ -635,7 +724,7 @@ class Suggester:
                             live.start()
                     if live is not None:
                         live.update(
-                            Markdown(buffered.strip(), code_theme=self.args.theme)
+                            Markdown(body.strip(), code_theme=self.args.theme)
                         )
                 final = stream.get_final_message()
         finally:
@@ -645,21 +734,25 @@ class Suggester:
         reply = "".join(
             block.text for block in final.content if block.type == "text"
         ).strip()
+        # authoritative parse from the final text (stream may have ended early)
+        journal_note, reply_body = split_note(reply)
+        if journal_note and final.stop_reason != "refusal":
+            journal_append(journal_note)
 
         if final.stop_reason == "refusal":
             self.printer.note("[claude declined to comment on this snapshot]")
         elif live is None:
             self.printer.tick()
         else:
-            self._save_suggestion(reply)
+            self._save_suggestion(reply_body)
             if self.args.notify:
-                notify_status(self.own_pane, summarize(reply))
+                notify_status(self.own_pane, summarize(reply_body))
 
         if self.args.timing and t_first is not None:
             self.printer.timing(t_first - t0, time.monotonic() - t0)
 
-        # keep the assistant turn (including SKIP) so the model knows what it
-        # already said and doesn't repeat itself
+        # keep the full assistant turn (NOTE included, so it won't re-journal
+        # the same event; SKIP included, so it won't repeat itself)
         self.messages.append({"role": "assistant", "content": reply or "SKIP"})
 
     @staticmethod
@@ -768,6 +861,7 @@ def watch(args: argparse.Namespace) -> None:
     last_activity_wall = time.time()
     returned_minutes: float | None = None
     have_client = False
+    first_analysis = True
 
     def note_activity(now_wall: float) -> None:
         nonlocal last_activity_wall, returned_minutes
@@ -837,11 +931,16 @@ def watch(args: argparse.Namespace) -> None:
         if direct or (pane_is_new and settled and cooled):
             analyzed_hash = digest
             last_call_at = now
+            # journal tail rides along only when memory is missing: the first
+            # call of this process, or a welcome-back after a break
+            include_journal = first_analysis or returned_minutes is not None
             snapshot = build_snapshot(
                 pane_text, read_vim_state(), direct, pane=target,
                 returned_minutes=returned_minutes,
+                journal=journal_tail() if include_journal else "",
             )
             returned_minutes = None
+            first_analysis = False
             if args.dry_run:
                 printer.divider()
                 if context_text:
@@ -991,6 +1090,9 @@ def main() -> None:
         return
     if len(sys.argv) > 1 and sys.argv[1] in ("hide", "show", "toggle"):
         pane_cmd(sys.argv[1:2])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "journal":
+        journal_cmd(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] in ("update", "--update"):
         update()

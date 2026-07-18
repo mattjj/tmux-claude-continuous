@@ -222,6 +222,32 @@ A tmux binding makes it one keystroke:
 bind P run-shell "tmux send-keys 'claude-pair' Enter"
 ```
 
+### The journal
+
+claude-pair keeps a running, human-readable log of what you get done, in
+markdown with date headers:
+
+```markdown
+## 2026-07-14
+
+- 14:02 ran pytest: test_mean failing (assert 2.0 == 3.0)
+- 14:09 fixed off-by-one in stats.py mean(); tests pass
+- 14:31 pushed fix-parser branch
+```
+
+It lives at `~/.local/share/claude-pair/journal.md` (a real file — grep it,
+edit it, keep it forever). `claude-pair journal` shows the tail
+(`claude-pair journal 50` for more).
+
+How it works: when a snapshot shows *completed* activity — a command ran,
+tests passed or failed, a file was saved — the model prefixes its reply with
+a one-line `NOTE:` that the watcher strips into the journal. Same API call
+as the suggestion, so it costs a handful of tokens and no extra latency;
+mid-typing snapshots produce no entries.
+
+Claude also reads the journal tail when its own memory is missing — at
+watcher startup and in welcome-back recaps — so context survives restarts.
+
 ### Welcome-back recaps
 
 Step away for an hour and the first thing Claude does when you return is
