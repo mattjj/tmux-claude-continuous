@@ -201,6 +201,7 @@ Useful flags (pass them to `claude-pair`; they're forwarded to the watcher):
 | `--context PATH` | — | file/dir to load as reference context (repeatable) |
 | `--context-budget` | `120000` | max chars loaded per context path |
 | `--away` | `60` | minutes of inactivity before a welcome-back recap (0 = off) |
+| `--journal-every` | `30` | minutes of work per journal checkpoint (0 = journaling off) |
 | `--model` | `claude-opus-4-8` | any Claude model id (`CLAUDE_PAIR_MODEL` env var also works) |
 | `--effort` | `low` | reasoning effort per suggestion; raise for deeper reviews |
 | `--think` | off | let the model think before answering (deeper, slower) |
@@ -224,26 +225,29 @@ bind P run-shell "tmux send-keys 'claude-pair' Enter"
 
 ### The journal
 
-claude-pair keeps a running, human-readable log of what you get done, in
-markdown with date headers:
+claude-pair keeps a running, human-readable journal of your work — high
+level, one entry per work stretch, not a log of every command:
 
 ```markdown
 ## 2026-07-14
 
-- 14:02 ran pytest: test_mean failing (assert 2.0 == 3.0)
-- 14:09 fixed off-by-one in stats.py mean(); tests pass
-- 14:31 pushed fix-parser branch
+- 14:31 Worked on the stats module: chased the failing test_mean down to
+  an off-by-one in mean(); fixed it, tests green. Left off starting the
+  variance refactor.
+- 16:05 Iterated on the parser branch with claude-pair's suggestions;
+  left off mid-rewrite of parse_expr with two cases still failing.
 ```
 
 It lives at `~/.local/share/claude-pair/journal.md` (a real file — grep it,
 edit it, keep it forever). `claude-pair journal` shows the tail
 (`claude-pair journal 50` for more).
 
-How it works: when a snapshot shows *completed* activity — a command ran,
-tests passed or failed, a file was saved — the model prefixes its reply with
-a one-line `NOTE:` that the watcher strips into the journal. Same API call
-as the suggestion, so it costs a handful of tokens and no extra latency;
-mid-typing snapshots produce no entries.
+Entries are written at natural boundaries: when you **step away** (so the
+entry can say where you left off), every `--journal-every` minutes of
+active work (default 30) as a checkpoint, and when the **watcher exits**.
+Each entry is one small extra API call over the already-cached conversation
+history, and the model sees its recent entries so it continues the story
+rather than repeating it. `--journal-every 0` disables journaling.
 
 Claude also reads the journal tail when its own memory is missing — at
 watcher startup and in welcome-back recaps — so context survives restarts.

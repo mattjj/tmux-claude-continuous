@@ -82,16 +82,12 @@ interrupting for, such as:
 - a meaningfully faster way to do what they are obviously trying to do
 - a quick implementation of code they are trying to write
 
-Running journal: you also maintain a human-readable log of what the user \
-gets done. When a snapshot shows newly *completed* activity — a command ran \
-(note its outcome), tests passed or failed, a file was saved, a task hit a \
-milestone — start your reply with exactly one line:
-NOTE: <what happened, past tense, from the user's perspective, ≤100 chars>
-then continue with SKIP or your bullets on the next line. The NOTE goes to \
-the journal file, not the suggestion pane, and it's the user's log — "ran \
-pytest: 3 failures in test_stats", not commentary about yourself. No NOTE \
-while they're mid-typing, and never repeat a NOTE you already made (your \
-earlier replies show them). Most snapshots need no NOTE.
+Occasionally a <journal_request> asks you to write the next entry of the \
+user's work journal. Respond with ONLY the entry text: one entry of 1-2 \
+sentences, high level — what they worked on in that stretch, where they \
+left off, what seems next. Past tense, their perspective, plain prose, no \
+bullets, no SKIP. Think "worked on the parser refactor; got the tokenizer \
+tests green, left off mid-rewrite of parse_expr" — not a list of commands.
 A <journal_recent> block, when present, is the tail of that journal — it \
 appears when you may lack context (session start, after a break); use it to \
 understand what the user has been doing.
@@ -122,8 +118,8 @@ written is wrong or headed somewhere bad.
 are in this conversation). If the situation hasn't changed, SKIP.
 - Don't guess at intent you can't see. If a command is ambiguous but \
 plausible, SKIP.
-- Respond with only the suggestion or SKIP (after the optional NOTE line) — \
-no preamble, no explanation of your reasoning, no "let me look".
+- Respond with only the suggestion or SKIP — no preamble, no explanation of \
+your reasoning, no "let me look". Get straight to it.
 - When you do speak: at most 3 short bullets ("- "), most important first. \
 Simple markdown only: bullets, `inline code`, and fenced code blocks with a \
 language tag (```fish, ```python, ```vim) for commands, snippets, and \
@@ -155,15 +151,6 @@ def capture_pane(target: str, scrollback: int) -> str:
 
 # ---------------------------------------------------------------------------
 # running journal: NOTE lines the model emits about completed activity
-
-
-def split_note(reply: str) -> tuple[str | None, str]:
-    """Separate a leading 'NOTE: ...' line from the visible reply body."""
-    s = reply.lstrip()
-    first, _, rest = s.partition("\n")
-    if first.upper().startswith("NOTE:"):
-        return first[5:].strip(), rest.strip()
-    return None, reply.strip()
 
 
 def journal_append(note: str) -> None:
@@ -640,13 +627,50 @@ class Suggester:
             self.messages.pop()
             time.sleep(5)
 
-    def _call(self) -> None:
+    def _system(self) -> list[dict]:
         # System = frozen prompt + (optional) loaded reference context, cached
         # together as a stable prefix ahead of the volatile snapshots.
         system = [{"type": "text", "text": SYSTEM_PROMPT}]
         if getattr(self, "context_text", ""):
             system.append({"type": "text", "text": self.context_text})
         system[-1]["cache_control"] = {"type": "ephemeral"}
+        return system
+
+    def journal_stretch(self, reason: str) -> None:
+        """One small call summarizing the recent work stretch into the journal."""
+        if not self.messages:
+            return
+        tail = journal_tail(12)
+        prior = (
+            f"Recent entries — continue the story, don't re-cover them:\n{tail}\n"
+            if tail else ""
+        )
+        request = (
+            "<journal_request>\n"
+            f"({reason}) Write the next entry for the user's work journal.\n"
+            f"{prior}</journal_request>"
+        )
+        try:
+            response = self.client.messages.create(
+                model=self.args.model,
+                max_tokens=400,
+                thinking={"type": "disabled"},
+                output_config={"effort": "low"},
+                cache_control={"type": "ephemeral"},
+                system=self._system(),
+                messages=self.messages + [{"role": "user", "content": request}],
+            )
+        except (self.anthropic.APIError, self.anthropic.APIConnectionError):
+            return  # journaling is best-effort
+        entry = " ".join(
+            "".join(b.text for b in response.content if b.type == "text").split()
+        ).strip("- ")
+        if entry and entry.upper() != "SKIP":
+            journal_append(entry)
+            self.printer.banner("✎ journal updated")
+
+    def _call(self) -> None:
+        system = self._system()
 
         kwargs = dict(
             model=self.args.model,
@@ -691,9 +715,7 @@ class Suggester:
             kwargs["speed"] = "fast"
             kwargs["betas"] = ["fast-mode-2026-02-01"]
 
-        buffered = ""  # raw stream, possibly starting with a NOTE: line
-        body = ""      # visible part (NOTE stripped) — drives SKIP/rendering
-        note_done = False
+        buffered = ""
         live: Live | None = None
         t0 = time.monotonic()
         t_first: float | None = None
@@ -703,20 +725,8 @@ class Suggester:
                     if t_first is None:
                         t_first = time.monotonic()
                     buffered += text
-                    if not note_done:
-                        s = buffered.lstrip()
-                        if s and not "NOTE:".startswith(s[:5].upper()):
-                            note_done, body = True, s  # not a journal line
-                        elif "\n" in s:
-                            first, _, rest = s.partition("\n")
-                            note_done = True
-                            body = rest if first.upper().startswith("NOTE:") else s
-                        else:
-                            continue  # can't tell yet — keep buffering
-                    else:
-                        body += text
                     if live is None:
-                        stripped = body.lstrip()
+                        stripped = buffered.lstrip()
                         if stripped and not "SKIP".startswith(stripped[:4].upper()):
                             # definitely not a SKIP — start rendering it
                             self.printer.divider()
@@ -724,7 +734,7 @@ class Suggester:
                             live.start()
                     if live is not None:
                         live.update(
-                            Markdown(body.strip(), code_theme=self.args.theme)
+                            Markdown(buffered.strip(), code_theme=self.args.theme)
                         )
                 final = stream.get_final_message()
         finally:
@@ -734,25 +744,21 @@ class Suggester:
         reply = "".join(
             block.text for block in final.content if block.type == "text"
         ).strip()
-        # authoritative parse from the final text (stream may have ended early)
-        journal_note, reply_body = split_note(reply)
-        if journal_note and final.stop_reason != "refusal":
-            journal_append(journal_note)
 
         if final.stop_reason == "refusal":
             self.printer.note("[claude declined to comment on this snapshot]")
         elif live is None:
             self.printer.tick()
         else:
-            self._save_suggestion(reply_body)
+            self._save_suggestion(reply)
             if self.args.notify:
-                notify_status(self.own_pane, summarize(reply_body))
+                notify_status(self.own_pane, summarize(reply))
 
         if self.args.timing and t_first is not None:
             self.printer.timing(t_first - t0, time.monotonic() - t0)
 
-        # keep the full assistant turn (NOTE included, so it won't re-journal
-        # the same event; SKIP included, so it won't repeat itself)
+        # keep the assistant turn (including SKIP) so the model knows what it
+        # already said and doesn't repeat itself
         self.messages.append({"role": "assistant", "content": reply or "SKIP"})
 
     @staticmethod
@@ -863,6 +869,19 @@ def watch(args: argparse.Namespace) -> None:
     have_client = False
     first_analysis = True
 
+    # journal-stretch bookkeeping: summarize on break, checkpoint, and exit
+    last_journal_wall = time.time()
+    suggest_calls = 0
+
+    def journal_checkpoint(reason: str) -> None:
+        nonlocal last_journal_wall, suggest_calls
+        if suggester and args.journal_every > 0 and suggest_calls > 0:
+            suggester.journal_stretch(reason)
+        last_journal_wall = time.time()
+        suggest_calls = 0
+
+    args._journal_exit = journal_checkpoint  # main() runs this on shutdown
+
     def note_activity(now_wall: float) -> None:
         nonlocal last_activity_wall, returned_minutes
         gap = now_wall - last_activity_wall
@@ -924,6 +943,16 @@ def watch(args: argparse.Namespace) -> None:
         while not stdin_inbox.empty():
             direct.append(stdin_inbox.get_nowait())
 
+        # journal the pre-break stretch right when a return is detected (the
+        # history is still pre-break), or checkpoint a long working stretch
+        if returned_minutes is not None:
+            journal_checkpoint(
+                "the user stepped away and just returned; summarize the "
+                "stretch before the break, ending with where they left off"
+            )
+        elif time.time() - last_journal_wall >= args.journal_every * 60 > 0:
+            journal_checkpoint("periodic checkpoint of the current work stretch")
+
         settled = last_change_at is not None and now - last_change_at >= args.debounce
         cooled = now - last_call_at >= args.cooldown
         pane_is_new = digest != analyzed_hash
@@ -948,6 +977,7 @@ def watch(args: argparse.Namespace) -> None:
                 printer.stream(snapshot + "\n")
             else:
                 suggester.suggest(snapshot, context_text)
+                suggest_calls += 1
 
         time.sleep(args.interval)
 
@@ -1129,6 +1159,15 @@ def main() -> None:
         "a recap of what you were doing (default 60; 0 disables)",
     )
     parser.add_argument(
+        "--journal-every",
+        type=float,
+        default=30.0,
+        metavar="MINUTES",
+        help="checkpoint the work journal after this many minutes of active "
+        "work (default 30; 0 disables journaling). Entries are also written "
+        "when you step away and when the watcher exits.",
+    )
+    parser.add_argument(
         "--context",
         action="append",
         metavar="PATH",
@@ -1225,6 +1264,10 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\nclaude-pair: bye")
         finally:
+            exit_checkpoint = getattr(args, "_journal_exit", None)
+            if exit_checkpoint:
+                exit_checkpoint("the session is ending; wrap up this work "
+                                "stretch, ending with where the user left off")
             PANE_FILE.unlink(missing_ok=True)
     else:
         # forward every flag except --width to the inner invocation
